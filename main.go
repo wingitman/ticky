@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -72,6 +73,13 @@ func runTUI(ttyPath string) {
 	}
 
 	if _, err := p.Run(); err != nil {
+		// If the terminal doesn't support raw mode (e.g. ticky was relaunched
+		// into a PTY that neovim or another editor is controlling), fall back
+		// to a plain-text notification rather than showing a cryptic error.
+		if strings.Contains(err.Error(), "raw mode") || strings.Contains(err.Error(), "input/output") {
+			writePlainNotification("")
+			return
+		}
 		fmt.Fprintf(os.Stderr, "ticky: %v\n", err)
 		os.Exit(1)
 	}
@@ -109,19 +117,23 @@ func runWatch() {
 
 // notify routes the timer-fired notification to the right mechanism.
 func notify(sess *session.Session) {
+	// Check $TMUX at watcher runtime as well as the session snapshot.
+	// The watcher inherits the environment of the process that launched it,
+	// so $TMUX is set if ticky was started inside tmux — even if in_tmux
+	// wasn't recorded in the session (e.g. old session file, or the task was
+	// started before environment capture was added).
+	inTmuxNow := os.Getenv("TMUX") != ""
+
 	switch {
-	case sess.InTmux:
+	case sess.InTmux || inTmuxNow:
 		// tmux: open a popup over whatever pane the user is in.
-		// The popup runs ticky normally; tmux provides a fresh PTY so there
-		// is no raw-mode conflict regardless of what's in the main pane.
+		// tmux allocates a fresh PTY for the popup so there is no raw-mode
+		// conflict regardless of what is running in the main pane.
 		notifyTmux()
 
 	case sess.NvimSocket != "" || sess.VimContext:
 		// neovim/vim: ticky.nvim polls --check and handles the notification
-		// natively inside the editor. We don't attempt TUI relaunch here to
-		// avoid the "error entering raw mode" crash.
-		// Write a plain-text message as a best-effort fallback for plain vim
-		// or neovim without ticky.nvim installed.
+		// natively. Write a plain-text fallback for users without ticky.nvim.
 		writePlainNotification(sess.TTY)
 
 	default:
