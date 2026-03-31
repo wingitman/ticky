@@ -22,13 +22,15 @@ type Mode int
 const (
 	ModeTaskList    Mode = iota // default: scrollable task list
 	ModeGroupList               // group management view
-	ModeEditTask                // create / edit task (tabbed form)
+	ModeEditTask                // create / edit task (navigable form)
+	ModeTaskActions             // action sub-menu for active task
 	ModeTimerFocus              // running focus countdown
 	ModeTimerBreak              // running break countdown
 	ModePausePrompt             // "why are you pausing?" overlay
-	ModeBreakPrompt             // focus-done choice overlay
+	ModeBreakPrompt             // focus-done / break-done choice overlay
+	ModeCompletion              // celebratory animation on task complete
 	ModeReport                  // report table
-	ModeCompleted               // completed tasks list (bug 3: was ModeHistory)
+	ModeCompleted               // completed tasks list
 	ModeError                   // unrecoverable error overlay
 )
 
@@ -41,6 +43,15 @@ const (
 	fieldBreakTime
 	fieldGroup
 	fieldCount // sentinel
+)
+
+// taskActionsConfirm tracks which action the actions sub-menu is confirming.
+type taskActionsConfirm int
+
+const (
+	confirmNone     taskActionsConfirm = iota
+	confirmComplete                    // waiting for y/n to complete task
+	confirmAbandon                     // waiting for y/n to abandon task
 )
 
 // ─── resolvedKeys ─────────────────────────────────────────────────────────────
@@ -106,16 +117,15 @@ type Model struct {
 	offset int
 
 	// Which task is actively being timed (index into store.Tasks, -1 = none).
-	// Bug 2: this persists even when returning to ModeTaskList so the task
-	// stays visible and can be resumed.
 	activeTaskIdx int
 
-	// Timer — persists across mode changes (bug 2)
+	// Timer — persists across mode changes
 	tmr timer.Timer
 
 	// Edit form state
 	editingTaskID string
 	editField     editField
+	editActive    bool // true while a text input is being edited (vs. navigating)
 	editInputs    [fieldCount]textinput.Model
 
 	// Group list state
@@ -125,6 +135,18 @@ type Model struct {
 
 	// Pause prompt input (reused for group name entry)
 	pauseInput textinput.Model
+
+	// Task actions sub-menu
+	actionsConfirm taskActionsConfirm
+
+	// Break prompt state
+	breakPromptEnteredAt time.Time // when ModeBreakPrompt was entered (for debounce)
+	afterBreak           bool      // true when coming from a completed break (not focus)
+	autoBreakScheduled   bool      // true when auto_start_break countdown is running
+
+	// Completion animation state
+	completionFrame    int
+	completionTaskName string
 
 	// Completed / report view scroll
 	completedCursor int
@@ -184,8 +206,6 @@ func New(cfg *config.Config, store *storage.Store, sess *session.Session) Model 
 		timeFormatIdx: fmtIdx,
 	}
 
-	// Bug 4: if an active session exists and is due, open directly to break prompt.
-	// If still running, resume the timer on the task list with the remaining time.
 	if session.IsActive(sess) {
 		m = m.resumeFromSession(sess)
 	}
@@ -195,7 +215,6 @@ func New(cfg *config.Config, store *storage.Store, sess *session.Session) Model 
 
 // resumeFromSession restores timer state from a persisted session.
 func (m Model) resumeFromSession(sess *session.Session) Model {
-	// Find the task in the store.
 	for i := range m.store.Tasks {
 		if m.store.Tasks[i].ID == sess.TaskID {
 			m.activeTaskIdx = i
@@ -205,10 +224,17 @@ func (m Model) resumeFromSession(sess *session.Session) Model {
 				focusMin := m.store.Tasks[i].FocusTime
 				m.tmr = timer.New(focusMin)
 				m.tmr.Remaining = remaining
+
 				if session.IsDue(sess) {
 					// Timer already fired — go straight to break prompt.
 					m.store.Tasks[i].EndedAt = time.Now()
 					m.mode = ModeBreakPrompt
+					m.breakPromptEnteredAt = time.Now()
+				} else if sess.Paused {
+					// Session is paused — show timer in paused state.
+					m.tmr.Start()
+					m.tmr.Pause()
+					m.mode = ModeTimerFocus
 				} else {
 					// Timer still running — resume it.
 					m.tmr.Start()
@@ -220,11 +246,17 @@ func (m Model) resumeFromSession(sess *session.Session) Model {
 				m.tmr = timer.New(sess.BreakMin)
 				m.tmr.Phase = timer.PhaseBreak
 				m.tmr.Remaining = remaining
+
 				if session.IsDue(sess) {
-					// Break done — back to task list.
-					m.mode = ModeTaskList
-					m.activeTaskIdx = -1
+					// Break done — show the re-prompt.
 					_ = session.Delete()
+					m.mode = ModeBreakPrompt
+					m.breakPromptEnteredAt = time.Now()
+					m.afterBreak = true
+				} else if sess.Paused {
+					m.tmr.Start()
+					m.tmr.Pause()
+					m.mode = ModeTimerBreak
 				} else {
 					m.tmr.Start()
 					m.mode = ModeTimerBreak
@@ -239,9 +271,15 @@ func (m Model) resumeFromSession(sess *session.Session) Model {
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
 func (m Model) Init() tea.Cmd {
-	// If we resumed into an active timer, kick off the tick loop.
 	if m.mode == ModeTimerFocus || m.mode == ModeTimerBreak {
-		return tickCmd()
+		if m.tmr.State == timer.StateRunning {
+			return tea.Batch(tickCmd(), pollSessionCmd())
+		}
+		// Paused on resume — still poll so other clients can sync.
+		return pollSessionCmd()
+	}
+	if m.mode == ModeBreakPrompt {
+		return m.breakPromptInitCmd()
 	}
 	return nil
 }
@@ -258,6 +296,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		return m.handleTick()
+
+	case sessionPollMsg:
+		return m.handleSessionPoll()
+
+	case completionTickMsg:
+		return m.handleCompletionTick()
+
+	case autoStartBreakMsg:
+		return m.handleAutoStartBreak()
 
 	case saveErrMsg:
 		m.mode = ModeError
@@ -277,12 +324,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateGroupList(key)
 		case ModeEditTask:
 			return m.updateEditTask(msg)
+		case ModeTaskActions:
+			return m.updateTaskActions(key)
 		case ModeTimerFocus, ModeTimerBreak:
 			return m.updateTimer(key)
 		case ModePausePrompt:
 			return m.updatePausePrompt(msg)
 		case ModeBreakPrompt:
 			return m.updateBreakPrompt(key)
+		case ModeCompletion:
+			// No key handling during animation — it auto-exits.
+			return m, nil
 		case ModeReport:
 			return m.updateReport(key)
 		case ModeCompleted:
@@ -304,9 +356,14 @@ func (m Model) handleTick() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// If paused, don't advance the timer — but keep polling for sync.
+	if m.tmr.State == timer.StatePaused {
+		return m, pollSessionCmd()
+	}
+
 	done := m.tmr.Tick()
 	if !done {
-		return m, tickCmd()
+		return m, tea.Batch(tickCmd(), pollSessionCmd())
 	}
 
 	if m.tmr.Phase == timer.PhaseFocus {
@@ -316,14 +373,97 @@ func (m Model) handleTick() (tea.Model, tea.Cmd) {
 		// Delete session — watcher's job is done.
 		_ = session.Delete()
 		m.mode = ModeBreakPrompt
+		m.breakPromptEnteredAt = time.Now()
+		m.afterBreak = false
+		m.autoBreakScheduled = false
+		return m, m.breakPromptInitCmd()
+	}
+
+	// Break finished — delete session and re-show break prompt so the
+	// user can resolve the task (complete / abandon / extend).
+	_ = session.Delete()
+	m.mode = ModeBreakPrompt
+	m.breakPromptEnteredAt = time.Now()
+	m.afterBreak = true
+	m.autoBreakScheduled = false
+	return m, m.breakPromptInitCmd()
+}
+
+// ─── handleSessionPoll ────────────────────────────────────────────────────────
+
+// handleSessionPoll re-reads session.toml once per second so that changes
+// made by another ticky client (pause, extend, stop) are reflected here.
+func (m Model) handleSessionPoll() (tea.Model, tea.Cmd) {
+	disk, err := session.Load()
+	if err != nil {
+		return m, pollSessionCmd()
+	}
+
+	// Session was cleared by another client — stop everything.
+	if !session.IsActive(disk) && m.activeTaskIdx >= 0 {
+		m.tmr.Pause() // stop ticking
+		m.activeTaskIdx = -1
+		m.sess = &session.Session{}
+		m.mode = ModeTaskList
 		return m, nil
 	}
 
-	// Break finished.
-	_ = session.Delete()
-	m.mode = ModeTaskList
-	m.activeTaskIdx = -1
-	return m, saveCmd(m.store)
+	if !session.IsActive(disk) {
+		return m, nil
+	}
+
+	// Another client paused the session.
+	if disk.Paused && m.tmr.State == timer.StateRunning {
+		m.tmr.Pause()
+		m.sess.Paused = true
+		m.sess.PausedAt = disk.PausedAt
+		if m.mode == ModeTimerFocus || m.mode == ModeTimerBreak {
+			// Stay on the timer screen but paused.
+			return m, pollSessionCmd()
+		}
+		return m, pollSessionCmd()
+	}
+
+	// Another client resumed the session.
+	if !disk.Paused && m.tmr.State == timer.StatePaused && m.sess != nil && m.sess.Paused {
+		m.tmr.Remaining = session.Remaining(disk)
+		m.sess.Paused = false
+		m.sess.EndTime = disk.EndTime
+		m.tmr.Resume()
+		return m, tea.Batch(tickCmd(), pollSessionCmd())
+	}
+
+	// Another client extended the timer — update our remaining time.
+	if m.sess != nil && !disk.EndTime.IsZero() && disk.EndTime != m.sess.EndTime {
+		m.tmr.Remaining = session.Remaining(disk)
+		m.tmr.Total = m.tmr.Remaining + (m.tmr.Total - m.tmr.Remaining) // keep progress sensible
+		m.sess.EndTime = disk.EndTime
+	}
+
+	return m, pollSessionCmd()
+}
+
+// ─── handleCompletionTick ─────────────────────────────────────────────────────
+
+func (m Model) handleCompletionTick() (tea.Model, tea.Cmd) {
+	m.completionFrame++
+	if m.completionFrame >= completionTotalFrames {
+		m.mode = ModeTaskList
+		return m, nil
+	}
+	return m, completionTickCmd()
+}
+
+// ─── handleAutoStartBreak ─────────────────────────────────────────────────────
+
+func (m Model) handleAutoStartBreak() (tea.Model, tea.Cmd) {
+	// Only fire if we're still in the break prompt and no key was pressed
+	// (autoBreakScheduled is cleared when the user presses any key).
+	if m.mode != ModeBreakPrompt || !m.autoBreakScheduled || m.afterBreak {
+		return m, nil
+	}
+	m.autoBreakScheduled = false
+	return m.startBreak()
 }
 
 // ─── ModeTaskList ─────────────────────────────────────────────────────────────
@@ -349,7 +489,15 @@ func (m Model) updateTaskList(key string) (tea.Model, tea.Cmd) {
 
 	case matchKey(key, m.keys.edit):
 		if len(tasks) > 0 && m.cursor < len(tasks) {
-			m = m.beginEditTask(tasks[m.cursor].ID)
+			selected := tasks[m.cursor]
+			// If the selected task is the active one, open actions sub-menu.
+			if m.activeTaskIdx >= 0 && m.store.Tasks[m.activeTaskIdx].ID == selected.ID {
+				m.mode = ModeTaskActions
+				m.actionsConfirm = confirmNone
+				return m, nil
+			}
+			// Otherwise open the edit form.
+			m = m.beginEditTask(selected.ID)
 		}
 
 	case matchKey(key, m.keys.delete):
@@ -370,11 +518,7 @@ func (m Model) updateTaskList(key string) (tea.Model, tea.Cmd) {
 		// p on the task list — only acts if the selected task is the active one.
 		if m.activeTaskIdx >= 0 && len(tasks) > 0 && m.cursor < len(tasks) &&
 			m.store.Tasks[m.activeTaskIdx].ID == tasks[m.cursor].ID {
-			m.tmr.Pause()
-			m.pauseInput.SetValue("")
-			m.pauseInput.Focus()
-			m.mode = ModePausePrompt
-			return m, textinput.Blink
+			return m.pauseTimer()
 		}
 
 	case matchKey(key, m.keys.stop):
@@ -387,9 +531,12 @@ func (m Model) updateTaskList(key string) (tea.Model, tea.Cmd) {
 	case matchKey(key, m.keys.start):
 		if len(tasks) > 0 && m.cursor < len(tasks) {
 			selected := tasks[m.cursor]
-			// If selected task is the active one, resume its timer.
+			// If selected task is the active one, navigate to its timer screen.
 			if m.activeTaskIdx >= 0 && m.store.Tasks[m.activeTaskIdx].ID == selected.ID {
-				m.tmr.Resume()
+				if m.tmr.State == timer.StatePaused {
+					// Resume from paused state.
+					return m.resumeTimer()
+				}
 				m.mode = ModeTimerFocus
 				return m, tickCmd()
 			}
@@ -407,7 +554,7 @@ func (m Model) updateTaskList(key string) (tea.Model, tea.Cmd) {
 		m.mode = ModeReport
 		m.reportScroll = 0
 
-	case matchKey(key, m.keys.completed): // bug 3: was history
+	case matchKey(key, m.keys.completed):
 		m.mode = ModeCompleted
 		m.completedCursor = 0
 		m.completedOffset = 0
@@ -416,14 +563,12 @@ func (m Model) updateTaskList(key string) (tea.Model, tea.Cmd) {
 		m.timeFormatIdx = (m.timeFormatIdx + 1) % len(timeFormats)
 
 	case matchKey(key, m.keys.options):
-		// Bug 1: use tea.ExecProcess so BubbleTea suspends and hands the
-		// terminal fully to the editor, then resumes cleanly after exit.
 		return m, openConfigCmd()
 
 	case matchKey(key, m.keys.close), key == "esc":
-		// Bug 2/4: if a timer is running, launch background watcher then quit.
+		// If a timer is running, ensure watcher is alive then quit.
 		if m.activeTaskIdx >= 0 {
-			return m, tea.Batch(launchWatcherCmd(m.store, m.sess, m.activeTaskIdx, m.tmr), tea.Quit)
+			return m, tea.Batch(launchWatcherCmd(m.sess), tea.Quit)
 		}
 		return m, tea.Quit
 	}
@@ -431,19 +576,14 @@ func (m Model) updateTaskList(key string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// stopTask cancels the active timer and resets the task back to its unstarted
-// state — StartedAt, EndedAt, and Interrupts are cleared so the task can be
-// started fresh. The session file and watcher process are also cleaned up.
-// The task remains in the active list; it is not marked completed or abandoned.
+// stopTask cancels the active timer and resets the task.
 func (m Model) stopTask() (Model, tea.Cmd) {
 	if m.activeTaskIdx < 0 || m.activeTaskIdx >= len(m.store.Tasks) {
 		return m, nil
 	}
 
-	// Kill the background watcher if one is running.
 	killWatcher(m.sess)
 
-	// Reset the task to a clean, unstarted state.
 	m.store.Tasks[m.activeTaskIdx].StartedAt = time.Time{}
 	m.store.Tasks[m.activeTaskIdx].EndedAt = time.Time{}
 	m.store.Tasks[m.activeTaskIdx].Interrupts = nil
@@ -456,8 +596,53 @@ func (m Model) stopTask() (Model, tea.Cmd) {
 	return m, saveCmd(m.store)
 }
 
+// pauseTimer pauses the in-memory timer, writes pause state to disk, and
+// kills the --watch subprocess (it must not fire while paused).
+func (m Model) pauseTimer() (Model, tea.Cmd) {
+	m.tmr.Pause()
+	m.pauseInput.SetValue("")
+	m.pauseInput.Focus()
+	m.mode = ModePausePrompt
+
+	// Persist pause state and kill watcher.
+	if m.sess != nil {
+		m.sess.Paused = true
+		m.sess.PausedAt = time.Now()
+		killWatcher(m.sess)
+		m.sess.WatchPID = 0
+	}
+
+	return m, tea.Batch(
+		saveSessionCmd(m.sess),
+		textinput.Blink,
+	)
+}
+
+// resumeTimer resumes from a paused state, shifting EndTime forward to
+// account for the time spent paused, and launching a new watcher.
+func (m Model) resumeTimer() (Model, tea.Cmd) {
+	if m.sess != nil && m.sess.Paused && !m.sess.PausedAt.IsZero() {
+		pausedFor := time.Since(m.sess.PausedAt)
+		m.sess.EndTime = m.sess.EndTime.Add(pausedFor)
+		m.sess.Paused = false
+		m.sess.PausedAt = time.Time{}
+		m.tmr.Remaining = session.Remaining(m.sess)
+	}
+	m.tmr.Resume()
+	if m.tmr.Phase == timer.PhaseBreak {
+		m.mode = ModeTimerBreak
+	} else {
+		m.mode = ModeTimerFocus
+	}
+	return m, tea.Batch(
+		tickCmd(),
+		pollSessionCmd(),
+		saveSessionCmd(m.sess),
+		launchWatcherCmd(m.sess),
+	)
+}
+
 // startTask begins a focus session for the given task ID.
-// Bug 4: writes session.toml, launches --watch subprocess, then quits the TUI.
 func (m Model) startTask(id string) (tea.Model, tea.Cmd) {
 	for i := range m.store.Tasks {
 		if m.store.Tasks[i].ID == id {
@@ -483,11 +668,12 @@ func (m Model) startTask(id string) (tea.Model, tea.Cmd) {
 				NvimSocket: env.NvimSocket,
 				VimContext: env.VimContext,
 			}
+			m.sess = sess
 
 			return m, tea.Batch(
 				saveCmd(m.store),
 				saveSessionCmd(sess),
-				launchWatcherCmd(m.store, sess, i, m.tmr),
+				launchWatcherCmd(sess),
 				tea.Quit,
 			)
 		}
@@ -495,11 +681,109 @@ func (m Model) startTask(id string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// ─── ModeTaskActions ──────────────────────────────────────────────────────────
+
+func (m Model) updateTaskActions(key string) (tea.Model, tea.Cmd) {
+	switch m.actionsConfirm {
+	case confirmComplete:
+		switch key {
+		case "y", "Y":
+			return m.completeTask()
+		case "n", "N", "esc":
+			m.actionsConfirm = confirmNone
+		}
+		return m, nil
+
+	case confirmAbandon:
+		switch key {
+		case "y", "Y":
+			return m.abandonTask()
+		case "n", "N", "esc":
+			m.actionsConfirm = confirmNone
+		}
+		return m, nil
+	}
+
+	// Main actions menu.
+	switch key {
+	case "p", "P":
+		m.mode = ModeTaskList
+		return m.pauseTimer()
+
+	case "r", "R":
+		// Resume (only shown when paused).
+		if m.tmr.State == timer.StatePaused {
+			m.mode = ModeTaskList
+			return m.resumeTimer()
+		}
+
+	case "s", "S":
+		m.mode = ModeTaskList
+		return m.stopTask()
+
+	case "c", "C":
+		m.actionsConfirm = confirmComplete
+
+	case "a", "A":
+		m.actionsConfirm = confirmAbandon
+
+	case "esc", "q":
+		m.mode = ModeTaskList
+	}
+
+	return m, nil
+}
+
+// completeTask marks the active task as completed and cleans up.
+func (m Model) completeTask() (Model, tea.Cmd) {
+	if m.activeTaskIdx >= 0 && m.activeTaskIdx < len(m.store.Tasks) {
+		m.store.Tasks[m.activeTaskIdx].Completed = true
+		if m.store.Tasks[m.activeTaskIdx].EndedAt.IsZero() {
+			m.store.Tasks[m.activeTaskIdx].EndedAt = time.Now()
+		}
+	}
+	killWatcher(m.sess)
+	_ = session.Delete()
+	m.sess = &session.Session{}
+
+	taskName := ""
+	if m.activeTaskIdx >= 0 && m.activeTaskIdx < len(m.store.Tasks) {
+		taskName = m.store.Tasks[m.activeTaskIdx].Name
+	}
+	m.activeTaskIdx = -1
+
+	if m.cfg.Display.ShowCompletionAnimation {
+		m.mode = ModeCompletion
+		m.completionFrame = 0
+		m.completionTaskName = taskName
+		return m, tea.Batch(saveCmd(m.store), completionTickCmd())
+	}
+	m.mode = ModeTaskList
+	return m, saveCmd(m.store)
+}
+
+// abandonTask marks the active task as abandoned and cleans up.
+func (m Model) abandonTask() (Model, tea.Cmd) {
+	if m.activeTaskIdx >= 0 && m.activeTaskIdx < len(m.store.Tasks) {
+		m.store.Tasks[m.activeTaskIdx].Abandoned = true
+		if m.store.Tasks[m.activeTaskIdx].EndedAt.IsZero() {
+			m.store.Tasks[m.activeTaskIdx].EndedAt = time.Now()
+		}
+	}
+	killWatcher(m.sess)
+	_ = session.Delete()
+	m.sess = &session.Session{}
+	m.activeTaskIdx = -1
+	m.mode = ModeTaskList
+	return m, saveCmd(m.store)
+}
+
 // ─── ModeEditTask ─────────────────────────────────────────────────────────────
 
 func (m Model) beginEditTask(id string) Model {
 	m.editingTaskID = id
 	m.editField = fieldName
+	m.editActive = false
 
 	for i := range m.editInputs {
 		m.editInputs[i].SetValue("")
@@ -520,7 +804,6 @@ func (m Model) beginEditTask(id string) Model {
 		}
 	}
 
-	m.editInputs[fieldName].Focus()
 	m.mode = ModeEditTask
 	return m
 }
@@ -528,30 +811,59 @@ func (m Model) beginEditTask(id string) Model {
 func (m Model) updateEditTask(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
+	if m.editActive {
+		// Currently editing a field — only enter/esc exit editing mode.
+		switch key {
+		case "enter":
+			// Exit editing mode and stay on this field.
+			m.editInputs[m.editField].Blur()
+			m.editActive = false
+			return m, nil
+		case "esc":
+			m.editInputs[m.editField].Blur()
+			m.editActive = false
+			return m, nil
+		}
+		// Forward all other keys to the active input.
+		var cmd tea.Cmd
+		m.editInputs[m.editField], cmd = m.editInputs[m.editField].Update(msg)
+		return m, cmd
+	}
+
+	// Navigation mode.
 	switch key {
 	case "esc":
 		m.mode = ModeTaskList
 		return m, nil
 
-	case "tab", "shift+tab":
-		m.editInputs[m.editField].Blur()
-		if key == "tab" {
-			m.editField = (m.editField + 1) % fieldCount
-		} else {
-			m.editField = (m.editField + fieldCount - 1) % fieldCount
+	case "enter":
+		// On the last field, enter saves the form. On other fields, enter
+		// activates the input for editing.
+		if m.editField == fieldCount-1 {
+			return m.commitEditTask()
 		}
+		m.editActive = true
 		m.editInputs[m.editField].Focus()
 		var cmd tea.Cmd
 		m.editInputs[m.editField], cmd = m.editInputs[m.editField].Update(msg)
-		return m, cmd
-
-	case "enter":
-		return m.commitEditTask()
+		return m, tea.Batch(cmd, textinput.Blink)
 	}
 
-	var cmd tea.Cmd
-	m.editInputs[m.editField], cmd = m.editInputs[m.editField].Update(msg)
-	return m, cmd
+	// Up/down navigation between fields.
+	if matchKey(key, m.keys.up) {
+		if m.editField > 0 {
+			m.editField--
+		}
+		return m, nil
+	}
+	if matchKey(key, m.keys.down) {
+		if m.editField < fieldCount-1 {
+			m.editField++
+		}
+		return m, nil
+	}
+
+	return m, nil
 }
 
 func (m Model) commitEditTask() (tea.Model, tea.Cmd) {
@@ -667,26 +979,19 @@ func (m Model) updateGroupList(key string) (tea.Model, tea.Cmd) {
 
 // ─── ModeTimerFocus / ModeTimerBreak ─────────────────────────────────────────
 
-// updateTimer handles keys while the timer is on screen.
 func (m Model) updateTimer(key string) (tea.Model, tea.Cmd) {
 	switch {
 	case matchKey(key, m.keys.pause):
-		// p — pause and prompt for reason.
-		m.tmr.Pause()
-		m.pauseInput.SetValue("")
-		m.pauseInput.Focus()
-		m.mode = ModePausePrompt
-		return m, textinput.Blink
+		return m.pauseTimer()
 
 	case matchKey(key, m.keys.stop):
-		// x — stop and reset the task entirely.
 		return m.stopTask()
 
 	case matchKey(key, m.keys.close), key == "esc":
-		// q/esc — leave timer running in background, return to task list.
+		// Leave timer running in background, return to task list.
 		m.mode = ModeTaskList
 		if m.sess != nil && session.IsActive(m.sess) {
-			return m, launchWatcherCmd(m.store, m.sess, m.activeTaskIdx, m.tmr)
+			return m, launchWatcherCmd(m.sess)
 		}
 		return m, nil
 	}
@@ -700,9 +1005,9 @@ func (m Model) updatePausePrompt(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
 	switch key {
-	case "enter":
+	case "enter", "esc":
 		reason := m.pauseInput.Value()
-		if reason != "" && m.activeTaskIdx >= 0 && m.activeTaskIdx < len(m.store.Tasks) {
+		if key == "enter" && reason != "" && m.activeTaskIdx >= 0 && m.activeTaskIdx < len(m.store.Tasks) {
 			interrupt := storage.Interrupt{
 				Time:   time.Now(),
 				Reason: reason,
@@ -710,27 +1015,11 @@ func (m Model) updatePausePrompt(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.store.Tasks[m.activeTaskIdx].Interrupts = append(
 				m.store.Tasks[m.activeTaskIdx].Interrupts, interrupt,
 			)
+			_ = storage.Save(m.store)
 		}
 		m.pauseInput.SetValue("")
 		m.pauseInput.Blur()
-		m.tmr.Resume()
-		if m.tmr.Phase == timer.PhaseFocus {
-			m.mode = ModeTimerFocus
-		} else {
-			m.mode = ModeTimerBreak
-		}
-		return m, tickCmd()
-
-	case "esc":
-		m.pauseInput.SetValue("")
-		m.pauseInput.Blur()
-		m.tmr.Resume()
-		if m.tmr.Phase == timer.PhaseFocus {
-			m.mode = ModeTimerFocus
-		} else {
-			m.mode = ModeTimerBreak
-		}
-		return m, tickCmd()
+		return m.resumeTimer()
 	}
 
 	var cmd tea.Cmd
@@ -740,9 +1029,36 @@ func (m Model) updatePausePrompt(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // ─── ModeBreakPrompt ─────────────────────────────────────────────────────────
 
+// breakPromptInitCmd schedules the auto-start-break command if configured.
+func (m Model) breakPromptInitCmd() tea.Cmd {
+	debounce := time.Duration(m.cfg.Display.BreakPromptDebounce) * time.Second
+	if debounce <= 0 {
+		debounce = 0
+	}
+	if m.cfg.Display.AutoStartBreak && !m.afterBreak {
+		// Auto-start break fires after debounce.
+		return tea.Tick(debounce+time.Millisecond*100, func(_ time.Time) tea.Msg {
+			return autoStartBreakMsg{}
+		})
+	}
+	return nil
+}
+
 func (m Model) updateBreakPrompt(key string) (tea.Model, tea.Cmd) {
+	// Enforce debounce — ignore keypresses until the window has been open long enough.
+	debounce := time.Duration(m.cfg.Display.BreakPromptDebounce) * time.Second
+	if debounce > 0 && time.Since(m.breakPromptEnteredAt) < debounce {
+		return m, nil
+	}
+
+	// Any key press cancels the auto-start-break countdown.
+	m.autoBreakScheduled = false
+
 	switch key {
 	case "e", "E":
+		if m.afterBreak {
+			return m, nil // no extend after a break
+		}
 		// Extend focus by 5 minutes.
 		m.tmr.Extend(5)
 		endTime := time.Now().Add(m.tmr.Remaining)
@@ -751,54 +1067,44 @@ func (m Model) updateBreakPrompt(key string) (tea.Model, tea.Cmd) {
 		}
 		m.sess.EndTime = endTime
 		m.sess.Phase = session.PhaseFocus
+		m.afterBreak = false
 		m.mode = ModeTimerFocus
-		return m, tea.Batch(tickCmd(), saveSessionCmd(m.sess), launchWatcherCmd(m.store, m.sess, m.activeTaskIdx, m.tmr))
+		return m, tea.Batch(tickCmd(), pollSessionCmd(), saveSessionCmd(m.sess), launchWatcherCmd(m.sess))
 
 	case "b", "B":
-		// Start break.
-		breakMin := 5
-		if m.activeTaskIdx >= 0 && m.activeTaskIdx < len(m.store.Tasks) {
-			breakMin = m.store.Tasks[m.activeTaskIdx].BreakTime
+		if m.afterBreak {
+			return m, nil // no re-break after a break
 		}
-		m.tmr.StartBreak(breakMin)
-		endTime := time.Now().Add(m.tmr.Remaining)
-		if m.sess == nil {
-			m.sess = &session.Session{}
-		}
-		m.sess.EndTime = endTime
-		m.sess.Phase = session.PhaseBreak
-		m.sess.BreakMin = breakMin
-		m.mode = ModeTimerBreak
-		return m, tea.Batch(tickCmd(), saveSessionCmd(m.sess), launchWatcherCmd(m.store, m.sess, m.activeTaskIdx, m.tmr))
+		return m.startBreak()
 
 	case "c", "C":
-		// Complete task.
-		if m.activeTaskIdx >= 0 && m.activeTaskIdx < len(m.store.Tasks) {
-			m.store.Tasks[m.activeTaskIdx].Completed = true
-			if m.store.Tasks[m.activeTaskIdx].EndedAt.IsZero() {
-				m.store.Tasks[m.activeTaskIdx].EndedAt = time.Now()
-			}
-		}
-		_ = session.Delete()
-		m.mode = ModeTaskList
-		m.activeTaskIdx = -1
-		return m, saveCmd(m.store)
+		return m.completeTask()
 
 	case "a", "A":
-		// Abandon task.
-		if m.activeTaskIdx >= 0 && m.activeTaskIdx < len(m.store.Tasks) {
-			m.store.Tasks[m.activeTaskIdx].Abandoned = true
-			if m.store.Tasks[m.activeTaskIdx].EndedAt.IsZero() {
-				m.store.Tasks[m.activeTaskIdx].EndedAt = time.Now()
-			}
-		}
-		_ = session.Delete()
-		m.mode = ModeTaskList
-		m.activeTaskIdx = -1
-		return m, saveCmd(m.store)
+		return m.abandonTask()
 	}
 
 	return m, nil
+}
+
+// startBreak transitions to a break timer.
+func (m Model) startBreak() (Model, tea.Cmd) {
+	breakMin := 5
+	if m.activeTaskIdx >= 0 && m.activeTaskIdx < len(m.store.Tasks) {
+		breakMin = m.store.Tasks[m.activeTaskIdx].BreakTime
+	}
+	m.tmr.StartBreak(breakMin)
+	endTime := time.Now().Add(m.tmr.Remaining)
+	if m.sess == nil {
+		m.sess = &session.Session{}
+	}
+	m.sess.EndTime = endTime
+	m.sess.Phase = session.PhaseBreak
+	m.sess.BreakMin = breakMin
+	m.sess.Paused = false
+	m.afterBreak = false
+	m.mode = ModeTimerBreak
+	return m, tea.Batch(tickCmd(), pollSessionCmd(), saveSessionCmd(m.sess), launchWatcherCmd(m.sess))
 }
 
 // ─── ModeReport ───────────────────────────────────────────────────────────────
@@ -817,10 +1123,9 @@ func (m Model) updateReport(key string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// ─── ModeCompleted (bug 3: was ModeHistory) ───────────────────────────────────
+// ─── ModeCompleted ────────────────────────────────────────────────────────────
 
 func (m Model) updateCompleted(key string) (tea.Model, tea.Cmd) {
-	// Bug 3: use CompletedTasks (not FinishedTasks) — no abandoned tasks here.
 	completed := storage.CompletedTasks(m.store)
 	switch {
 	case matchKey(key, m.keys.up):
@@ -868,8 +1173,6 @@ func (m *Model) clampCompletedScroll() {
 
 // ─── Overlay helper ───────────────────────────────────────────────────────────
 
-// OverlayWidget returns the corner widget string for the current session,
-// respecting display config. Empty string means nothing to render.
 func (m Model) OverlayWidget() string {
 	return overlay.CornerWidget(m.cfg, m.sess, m.store)
 }
@@ -877,12 +1180,30 @@ func (m Model) OverlayWidget() string {
 // ─── Commands ─────────────────────────────────────────────────────────────────
 
 type tickMsg struct{}
+type sessionPollMsg struct{}
+type completionTickMsg struct{}
+type autoStartBreakMsg struct{}
 type saveErrMsg string
 type clearStatusMsg struct{}
+
+// completionTotalFrames is how many animation frames to show (~2s at 10fps).
+const completionTotalFrames = 20
 
 func tickCmd() tea.Cmd {
 	return tea.Tick(time.Second, func(_ time.Time) tea.Msg {
 		return tickMsg{}
+	})
+}
+
+func pollSessionCmd() tea.Cmd {
+	return tea.Tick(time.Second, func(_ time.Time) tea.Msg {
+		return sessionPollMsg{}
+	})
+}
+
+func completionTickCmd() tea.Cmd {
+	return tea.Tick(100*time.Millisecond, func(_ time.Time) tea.Msg {
+		return completionTickMsg{}
 	})
 }
 
@@ -897,7 +1218,9 @@ func saveCmd(s *storage.Store) tea.Cmd {
 
 func saveSessionCmd(sess *session.Session) tea.Cmd {
 	return func() tea.Msg {
-		_ = session.Save(sess)
+		if sess != nil {
+			_ = session.Save(sess)
+		}
 		return nil
 	}
 }
@@ -908,8 +1231,6 @@ func clearStatusCmd() tea.Cmd {
 	})
 }
 
-// openConfigCmd suspends BubbleTea and hands the terminal to the user's editor.
-// Bug 1: replaces the old fire-and-forget cmd.Start() approach.
 func openConfigCmd() tea.Cmd {
 	path, err := config.ConfigPath()
 	if err != nil {
@@ -924,12 +1245,18 @@ func openConfigCmd() tea.Cmd {
 	})
 }
 
-// launchWatcherCmd starts a background ticky --watch process that will
-// re-exec ticky --break on the stored TTY when the timer fires.
-// Bug 4: this is what keeps the timer alive after ticky exits.
-func launchWatcherCmd(store *storage.Store, sess *session.Session, taskIdx int, tmr timer.Timer) tea.Cmd {
+// launchWatcherCmd kills any existing watcher, then starts a fresh
+// ticky --watch subprocess that will notify when the timer fires.
+// The WatchPID in the session is updated after the new process starts.
+func launchWatcherCmd(sess *session.Session) tea.Cmd {
 	return func() tea.Msg {
-		// Resolve the ticky binary path (re-exec self).
+		if sess == nil {
+			return nil
+		}
+		// Kill the old watcher before launching a new one.
+		killWatcher(sess)
+		sess.WatchPID = 0
+
 		self := resolveSelf()
 		if self == "" {
 			return nil
@@ -938,16 +1265,12 @@ func launchWatcherCmd(store *storage.Store, sess *session.Session, taskIdx int, 
 		cmd.Stdin = nil
 		cmd.Stdout = nil
 		cmd.Stderr = nil
-		// Detach from parent process so it survives ticky exiting.
 		setSysProcAttr(cmd)
 		if err := cmd.Start(); err != nil {
-			return nil // non-fatal — watcher is best-effort
+			return nil
 		}
-		// Store the watcher PID in the session so we can kill it if needed.
-		if sess != nil {
-			sess.WatchPID = cmd.Process.Pid
-			_ = session.Save(sess)
-		}
+		sess.WatchPID = cmd.Process.Pid
+		_ = session.Save(sess)
 		return nil
 	}
 }
@@ -1012,12 +1335,25 @@ func (m Model) GroupName(groupID string) string {
 	return g.Name
 }
 
-// ActiveTaskID returns the ID of the currently timed task, or "".
 func (m Model) ActiveTaskID() string {
 	if m.activeTaskIdx < 0 || m.activeTaskIdx >= len(m.store.Tasks) {
 		return ""
 	}
 	return m.store.Tasks[m.activeTaskIdx].ID
+}
+
+// BreakPromptDebounceRemaining returns how many full seconds remain in the
+// debounce window, or 0 if the window has passed.
+func (m Model) BreakPromptDebounceRemaining() int {
+	debounce := time.Duration(m.cfg.Display.BreakPromptDebounce) * time.Second
+	if debounce <= 0 {
+		return 0
+	}
+	rem := debounce - time.Since(m.breakPromptEnteredAt)
+	if rem <= 0 {
+		return 0
+	}
+	return int(rem.Seconds()) + 1
 }
 
 func parseIntClamped(s string, def, minVal, maxVal int) int {
