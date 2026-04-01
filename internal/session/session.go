@@ -28,6 +28,11 @@ type Session struct {
 	TTY      string    `toml:"tty"`       // controlling TTY path (Unix only; empty on Windows)
 	BreakMin int       `toml:"break_min"` // break duration to use after focus ends
 
+	// Pause state — written when the user pauses so other clients can sync
+	// and the --watch subprocess knows not to fire while paused.
+	Paused   bool      `toml:"paused"`    // true while the timer is paused
+	PausedAt time.Time `toml:"paused_at"` // wall-clock time the pause began
+
 	// Environment snapshot — captured at task-start time so the watcher
 	// knows how to notify the user when the timer fires.
 	InTmux     bool   `toml:"in_tmux"`     // $TMUX was set when the task started

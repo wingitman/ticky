@@ -106,9 +106,15 @@ func runWatch() {
 		time.Sleep(remaining)
 	}
 
-	// Re-check — user may have already dismissed the session from within ticky.
+	// Re-check — user may have dismissed the session, or it may be paused.
 	sess2, err := session.Load()
 	if err != nil || !session.IsActive(sess2) {
+		return
+	}
+
+	// Do not fire the notification while the session is paused.
+	// A new --watch process will be launched when the user resumes.
+	if sess2.Paused {
 		return
 	}
 
@@ -204,7 +210,9 @@ func runCheck() {
 	mins := int(rem.Minutes())
 	secs := int(rem.Seconds()) % 60
 
-	if sess.Phase == session.PhaseBreak {
+	if sess.Paused {
+		fmt.Printf("paused: %02d:%02d remaining in focus for %q\n", mins, secs, taskName)
+	} else if sess.Phase == session.PhaseBreak {
 		fmt.Printf("break: %02d:%02d remaining in break for %q\n", mins, secs, taskName)
 	} else {
 		fmt.Printf("running: %02d:%02d remaining in focus for %q\n", mins, secs, taskName)

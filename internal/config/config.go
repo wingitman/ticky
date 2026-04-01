@@ -44,6 +44,21 @@ type Display struct {
 	// OverlayCorner controls which corner the status overlay appears in.
 	// Valid values: top-left | top-right | bottom-left | bottom-right
 	OverlayCorner string `toml:"overlay_corner"`
+
+	// BreakPromptDebounce is the number of seconds after the break prompt
+	// appears before it accepts keystrokes. Prevents accidental input if the
+	// timer fires while the user is mid-typing. 0 disables the debounce.
+	BreakPromptDebounce int `toml:"break_prompt_debounce"`
+
+	// ShowCompletionAnimation plays a brief ASCII confetti animation when a
+	// task is marked as complete.
+	ShowCompletionAnimation bool `toml:"show_completion_animation"`
+
+	// AutoStartBreak automatically begins the break timer when a focus
+	// session ends, after the break prompt debounce period elapses.
+	// The break prompt is still shown briefly; if the user presses a key
+	// during the debounce window, auto-start is cancelled.
+	AutoStartBreak bool `toml:"auto_start_break"`
 }
 
 // Config is the root configuration structure.
@@ -73,10 +88,13 @@ func Default() *Config {
 			Completed: "h",
 		},
 		Display: Display{
-			TimeFormat:    "minutes",
-			ShowTaskName:  false,
-			ShowTimeLeft:  false,
-			OverlayCorner: "top-right",
+			TimeFormat:              "minutes",
+			ShowTaskName:            false,
+			ShowTimeLeft:            false,
+			OverlayCorner:           "top-right",
+			BreakPromptDebounce:     2,
+			ShowCompletionAnimation: true,
+			AutoStartBreak:          false,
 		},
 	}
 }
@@ -141,6 +159,9 @@ func Load() (*Config, error) {
 	if cfg.Display.OverlayCorner == "" {
 		cfg.Display.OverlayCorner = "top-right"
 	}
+	if cfg.Display.BreakPromptDebounce < 0 {
+		cfg.Display.BreakPromptDebounce = 0
+	}
 
 	// Migration: if the file is missing new display keys (added after initial
 	// release), rewrite it so the user can see and edit them. Keybind
@@ -162,7 +183,10 @@ func needsMigration(path string) bool {
 	content := string(data)
 	return !containsStr(content, "show_task_name") ||
 		!containsStr(content, "completed") ||
-		!containsStr(content, "stop")
+		!containsStr(content, "stop") ||
+		!containsStr(content, "break_prompt_debounce") ||
+		!containsStr(content, "show_completion_animation") ||
+		!containsStr(content, "auto_start_break")
 }
 
 func containsStr(s, sub string) bool {
@@ -220,7 +244,16 @@ func migratedTOML(cfg *Config) string {
 		"show_time_left = " + boolStr(d.ShowTimeLeft) + "\n\n" +
 		"# Which corner to render the status overlay in (inside the ticky TUI).\n" +
 		"# Options: top-left | top-right | bottom-left | bottom-right\n" +
-		"overlay_corner = " + quote(d.OverlayCorner) + "\n"
+		"overlay_corner = " + quote(d.OverlayCorner) + "\n\n" +
+		"# Seconds to wait after the break prompt appears before accepting keystrokes.\n" +
+		"# Prevents accidentally triggering an action if the timer fires mid-typing.\n" +
+		"# Set to 0 to disable.\n" +
+		"break_prompt_debounce = " + itoa(d.BreakPromptDebounce) + "\n\n" +
+		"# Play a brief ASCII confetti animation when a task is marked complete.\n" +
+		"show_completion_animation = " + boolStr(d.ShowCompletionAnimation) + "\n\n" +
+		"# Automatically start the break timer when a focus session ends.\n" +
+		"# The break prompt is shown during the debounce window; pressing any key cancels.\n" +
+		"auto_start_break = " + boolStr(d.AutoStartBreak) + "\n"
 }
 
 func quote(s string) string { return `"` + s + `"` }
@@ -229,6 +262,26 @@ func boolStr(b bool) string {
 		return "true"
 	}
 	return "false"
+}
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	buf := [20]byte{}
+	pos := len(buf)
+	for n > 0 {
+		pos--
+		buf[pos] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg {
+		return "-" + string(buf[pos:])
+	}
+	return string(buf[pos:])
 }
 
 // WriteDefault writes a fully-commented default config to path.
@@ -299,5 +352,17 @@ show_time_left = false
 # Which corner to render the status overlay in (inside the ticky TUI).
 # Options: top-left | top-right | bottom-left | bottom-right
 overlay_corner = "top-right"
+
+# Seconds to wait after the break prompt appears before accepting keystrokes.
+# Prevents accidentally triggering an action if the timer fires mid-typing.
+# Set to 0 to disable.
+break_prompt_debounce = 2
+
+# Play a brief ASCII confetti animation when a task is marked complete.
+show_completion_animation = true
+
+# Automatically start the break timer when a focus session ends.
+# The break prompt is shown during the debounce window; pressing any key cancels.
+auto_start_break = false
 `
 }
