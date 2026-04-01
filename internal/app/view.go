@@ -29,13 +29,9 @@ func (m Model) View() string {
 		return m.renderEditTask()
 	case ModeGroupList:
 		return m.renderGroupList()
-	case ModeTaskActions:
-		return m.renderTaskActions()
-	case ModeCompletion:
-		return m.renderCompletion()
 	case ModeReport:
 		return m.renderReport()
-	case ModeCompleted:
+	case ModeCompleted: // bug 3: was ModeHistory
 		return m.renderCompleted()
 	case ModeError:
 		return m.renderError()
@@ -46,6 +42,8 @@ func (m Model) View() string {
 
 // ─── Corner overlay ───────────────────────────────────────────────────────────
 
+// renderCornerOverlay places the overlay widget in the configured corner of a
+// full-screen view. Returns empty string if nothing to show.
 func (m Model) renderCornerOverlay() string {
 	widget := m.OverlayWidget()
 	if widget == "" || m.width == 0 || m.height == 0 {
@@ -63,6 +61,8 @@ func (m Model) renderCornerOverlay() string {
 
 	corner := m.cfg.Display.OverlayCorner
 
+	// Build a full-screen canvas and stamp the widget into the chosen corner.
+	// We use ANSI cursor positioning for precision placement.
 	var row, col int
 	switch corner {
 	case "top-left":
@@ -81,6 +81,7 @@ func (m Model) renderCornerOverlay() string {
 		row = 1
 	}
 
+	// Use ANSI escape: save cursor, move to position, print, restore cursor.
 	return "\033[s" +
 		"\033[" + itoa(row) + ";" + itoa(col) + "H" +
 		rendered +
@@ -151,16 +152,16 @@ func (m Model) renderTaskList() string {
 		t := m.store.Tasks[m.activeTaskIdx]
 		rem := m.tmr.HHMMString()
 		if m.tmr.State == timer.StatePaused {
-			b.WriteString(ui.StyleWarning.Render("  ⏸ " + t.Name + "  " + rem + " remaining — enter to resume · e for actions · x to stop"))
+			b.WriteString(ui.StyleWarning.Render("  ⏸ " + t.Name + "  " + rem + " remaining — enter to resume · p to record pause reason · x to stop"))
 		} else {
-			b.WriteString(ui.StyleSuccess.Render("  ▶ " + t.Name + "  " + rem + " remaining — enter to view timer · e for actions · x to stop"))
+			b.WriteString(ui.StyleSuccess.Render("  ▶ " + t.Name + "  " + rem + " remaining — enter to view timer · p to pause · x to stop"))
 		}
 		b.WriteString("\n")
 	}
 
 	b.WriteString(m.renderStatusBar([]string{
 		m.keys.newTask + " new",
-		m.keys.edit + " edit/actions",
+		m.keys.edit + " edit",
 		m.keys.delete + " delete",
 		m.keys.start + " start",
 		m.keys.group + " groups",
@@ -179,6 +180,7 @@ func (m Model) renderTaskRow(t storage.Task, selected bool) string {
 	focusStr := m.FormatDuration(t.FocusTime)
 	breakStr := m.FormatDuration(t.BreakTime)
 
+	// Mark the active task — ▶ running, ⏸ paused.
 	activeMarker := ""
 	if m.activeTaskIdx >= 0 && m.store.Tasks[m.activeTaskIdx].ID == t.ID {
 		if m.tmr.State == timer.StatePaused {
@@ -206,55 +208,6 @@ func (m Model) renderTaskRow(t storage.Task, selected bool) string {
 		return ui.StyleSelected.Render(line)
 	}
 	return line
-}
-
-// ─── Task Actions Sub-menu ────────────────────────────────────────────────────
-
-func (m Model) renderTaskActions() string {
-	var b strings.Builder
-
-	taskName := ""
-	if m.activeTaskIdx >= 0 && m.activeTaskIdx < len(m.store.Tasks) {
-		taskName = m.store.Tasks[m.activeTaskIdx].Name
-	}
-
-	var content string
-	switch m.actionsConfirm {
-	case confirmComplete:
-		content = ui.StyleHeader.Render("TASK ACTIONS") + "\n\n" +
-			ui.StyleMuted.Render(taskName) + "\n\n" +
-			ui.StyleWarning.Render("Mark task as complete?") + "\n\n" +
-			ui.StyleStatusKey.Render("[Y]") + " Yes, complete it\n" +
-			ui.StyleStatusKey.Render("[N]") + " No, go back\n" +
-			ui.StyleStatusKey.Render("[esc]") + " Cancel"
-
-	case confirmAbandon:
-		content = ui.StyleHeader.Render("TASK ACTIONS") + "\n\n" +
-			ui.StyleMuted.Render(taskName) + "\n\n" +
-			ui.StyleWarning.Render("Abandon this task?") + "\n\n" +
-			ui.StyleStatusKey.Render("[Y]") + " Yes, abandon it\n" +
-			ui.StyleStatusKey.Render("[N]") + " No, go back\n" +
-			ui.StyleStatusKey.Render("[esc]") + " Cancel"
-
-	default:
-		pauseLabel := "[P] Pause"
-		if m.tmr.State == timer.StatePaused {
-			pauseLabel = "[R] Resume"
-		}
-		content = ui.StyleHeader.Render("TASK ACTIONS") + "\n\n" +
-			ui.StyleMuted.Render(taskName) + "\n\n" +
-			ui.StyleStatusKey.Render(pauseLabel) + "\n" +
-			ui.StyleStatusKey.Render("[S]") + " Stop & reset\n" +
-			ui.StyleStatusKey.Render("[C]") + " Complete task\n" +
-			ui.StyleStatusKey.Render("[A]") + " Abandon task\n\n" +
-			ui.StyleMuted.Render("esc") + " back"
-	}
-
-	box := ui.StyleBreakBox.Width(m.width - 8).Render(content)
-	b.WriteString("\n")
-	b.WriteString(centerStr(box, m.width))
-	b.WriteString("\n")
-	return b.String()
 }
 
 // ─── Timer Screen ─────────────────────────────────────────────────────────────
@@ -333,7 +286,7 @@ func (m Model) renderPausePrompt() string {
 		"Why are you pausing?\n" +
 		m.pauseInput.View() + "\n\n" +
 		ui.StyleMuted.Render("enter") + " resume  " +
-		ui.StyleMuted.Render("esc") + " resume without recording"
+		ui.StyleMuted.Render("esc") + " cancel without recording"
 
 	box := ui.StyleBox.Width(m.width - 8).Render(content)
 	b.WriteString("\n")
@@ -358,44 +311,13 @@ func (m Model) renderBreakPrompt() string {
 		}
 	}
 
-	// Header changes based on whether we just finished a break or a focus session.
-	var header string
-	if m.afterBreak {
-		header = ui.StyleSuccess.Render("BREAK COMPLETE — What's next?")
-	} else {
-		header = ui.StyleSuccess.Render("FOCUS SESSION COMPLETE")
-	}
-
-	// During debounce, show a countdown and grey out the actions.
-	debounceRem := m.BreakPromptDebounceRemaining()
-
-	var actions string
-	if debounceRem > 0 {
-		actions = ui.StyleMuted.Render("Keys active in " + itoa(debounceRem) + "s…")
-	} else {
-		if m.afterBreak {
-			// After a break: extend and re-break don't make sense.
-			actions = ui.StyleStatusKey.Render("[E]") + " Extend focus +5m\n" +
-				ui.StyleStatusKey.Render("[C]") + " Complete task\n" +
-				ui.StyleStatusKey.Render("[A]") + " Abandon task"
-		} else {
-			actions = ui.StyleStatusKey.Render("[E]") + " Extend focus +5m\n" +
-				ui.StyleStatusKey.Render("[B]") + " Start break\n" +
-				ui.StyleStatusKey.Render("[C]") + " Complete task\n" +
-				ui.StyleStatusKey.Render("[A]") + " Abandon task"
-		}
-	}
-
-	// Show auto-break hint if configured.
-	autoHint := ""
-	if m.cfg.Display.AutoStartBreak && !m.afterBreak && debounceRem > 0 && m.autoBreakScheduled {
-		autoHint = "\n" + ui.StyleMuted.Render("Break auto-starts after debounce — press any key to cancel")
-	}
-
-	content := header + "\n\n" +
+	content := ui.StyleSuccess.Render("FOCUS SESSION COMPLETE") + "\n\n" +
 		ui.StyleHeader.Render(taskName) + "\n" +
 		ui.StyleMuted.Render("Elapsed: "+elapsed) + "\n\n" +
-		actions + autoHint
+		ui.StyleStatusKey.Render("[E]") + " Extend focus +5m\n" +
+		ui.StyleStatusKey.Render("[B]") + " Start break\n" +
+		ui.StyleStatusKey.Render("[C]") + " Complete task\n" +
+		ui.StyleStatusKey.Render("[A]") + " Abandon task"
 
 	box := ui.StyleBreakBox.Width(m.width - 8).Render(content)
 	b.WriteString("\n")
@@ -420,40 +342,22 @@ func (m Model) renderEditTask() string {
 	labels := []string{"Name", "Focus (min)", "Break (min)", "Group"}
 	for i, inp := range m.editInputs {
 		label := labels[i]
-		isSelected := editField(i) == m.editField
-		isEditing := isSelected && m.editActive
-
-		if isEditing {
-			b.WriteString(ui.StyleStatusKey.Render("  ✎ " + label + ": "))
-		} else if isSelected {
+		if editField(i) == m.editField {
 			b.WriteString(ui.StyleStatusKey.Render("  > " + label + ": "))
 		} else {
 			b.WriteString(ui.StyleMuted.Render("    " + label + ": "))
 		}
-
-		if isEditing {
-			b.WriteString(inp.View())
-		} else {
-			// In navigation mode, show the current value as plain text (no cursor).
-			val := inp.Value()
-			if val == "" {
-				b.WriteString(ui.StyleMuted.Render(inp.Placeholder))
-			} else {
-				b.WriteString(val)
-			}
-		}
+		b.WriteString(inp.View())
 		b.WriteString("\n")
 	}
 
 	b.WriteString("\n")
-
-	var hint string
-	if m.editActive {
-		hint = "enter/esc done editing"
-	} else {
-		hint = m.keys.up + "/" + m.keys.down + " select  ·  enter edit  ·  enter on last field saves  ·  esc cancel"
-	}
-	b.WriteString(m.renderStatusBar([]string{hint}))
+	b.WriteString(m.renderStatusBar([]string{
+		"tab next field",
+		"shift+tab prev",
+		"enter save",
+		"esc cancel",
+	}))
 	return b.String()
 }
 
@@ -497,101 +401,6 @@ func (m Model) renderGroupList() string {
 		m.keys.delete + " delete",
 		m.keys.close + " back",
 	}))
-	return b.String()
-}
-
-// ─── Completion Animation ─────────────────────────────────────────────────────
-
-// confettiChars is the palette of characters used in the animation.
-var confettiChars = []string{"✦", "✧", "*", "·", "+", "✨", "★", "•", "◆", "◇"}
-
-// confettiColors cycles through celebratory colors.
-var confettiColors = []lipgloss.Color{
-	"#FFD700", // gold
-	"#FF69B4", // hot pink
-	"#00CED1", // dark turquoise
-	"#7CFC00", // lawn green
-	"#FF6347", // tomato
-	"#9370DB", // medium purple
-	"#40E0D0", // turquoise
-	"#FFA500", // orange
-}
-
-func (m Model) renderCompletion() string {
-	if m.width == 0 || m.height == 0 {
-		return ""
-	}
-
-	// Build a canvas of spaces.
-	canvas := make([][]rune, m.height)
-	for i := range canvas {
-		canvas[i] = make([]rune, m.width)
-		for j := range canvas[i] {
-			canvas[i][j] = ' '
-		}
-	}
-
-	// Scatter confetti using frame as a pseudo-random seed.
-	numParticles := (m.width * m.height) / 30
-	if numParticles > 120 {
-		numParticles = 120
-	}
-	var b strings.Builder
-
-	// Render background with ANSI positioning for confetti.
-	b.WriteString("\033[2J\033[H") // clear screen, home cursor
-
-	// Scatter confetti.
-	for i := 0; i < numParticles; i++ {
-		// Deterministic pseudo-random from frame and particle index.
-		seed := (m.completionFrame*7 + i*13 + i*i*3) % 1000
-		row := 1 + (seed*m.height/1000+m.completionFrame+i*3)%m.height
-		col := 1 + ((seed*m.width/1000 + i*7 + m.completionFrame*2) % m.width)
-		charIdx := (i + m.completionFrame) % len(confettiChars)
-		colorIdx := (i*3 + m.completionFrame) % len(confettiColors)
-
-		ch := confettiChars[charIdx]
-		color := confettiColors[colorIdx]
-
-		style := lipgloss.NewStyle().Foreground(color)
-		b.WriteString("\033[" + itoa(row) + ";" + itoa(col) + "H")
-		b.WriteString(style.Render(ch))
-	}
-
-	// Render the centered completion message on top of confetti.
-	centerRow := m.height/2 - 2
-	if centerRow < 1 {
-		centerRow = 1
-	}
-
-	taskDisplay := m.completionTaskName
-	if len([]rune(taskDisplay)) > m.width-8 {
-		runes := []rune(taskDisplay)
-		taskDisplay = string(runes[:m.width-9]) + "…"
-	}
-
-	completeStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#FFD700")).
-		Bold(true)
-	taskStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#FFFFFF")).
-		Bold(true)
-
-	completeLine := completeStyle.Render("  ✦ TASK COMPLETE ✦  ")
-	taskLine := taskStyle.Render(taskDisplay)
-
-	// Center the completion label.
-	clw := lipgloss.Width(completeLine)
-	clCol := max(1, (m.width-clw)/2+1)
-	b.WriteString("\033[" + itoa(centerRow) + ";" + itoa(clCol) + "H")
-	b.WriteString(completeLine)
-
-	// Center the task name below.
-	tlw := lipgloss.Width(taskLine)
-	tlCol := max(1, (m.width-tlw)/2+1)
-	b.WriteString("\033[" + itoa(centerRow+2) + ";" + itoa(tlCol) + "H")
-	b.WriteString(taskLine)
-
 	return b.String()
 }
 
@@ -684,11 +493,12 @@ func (m Model) renderReport() string {
 	return b.String()
 }
 
-// ─── Completed ────────────────────────────────────────────────────────────────
+// ─── Completed (bug 3: was History) ──────────────────────────────────────────
 
 func (m Model) renderCompleted() string {
 	var b strings.Builder
 
+	// Bug 3: header renamed, uses CompletedTasks not FinishedTasks.
 	b.WriteString(m.renderBanner("COMPLETED", ui.StyleHeader))
 	b.WriteString("\n")
 
