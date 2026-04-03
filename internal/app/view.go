@@ -46,10 +46,19 @@ func (m Model) View() string {
 
 // ─── Corner overlay ───────────────────────────────────────────────────────────
 
-func (m Model) renderCornerOverlay() string {
+// placeOverlay composites the corner overlay widget onto the rendered base view
+// by merging lines directly — no raw ANSI cursor-positioning escape codes are
+// emitted. This keeps the output safe for any terminal host (embedded terminals
+// in editors, multiplexers, floating windows, etc.) where absolute \033[row;colH
+// jumps would escape the intended rendering region and corrupt the host UI.
+//
+// Each widget line is written over the corresponding base line at the computed
+// horizontal offset. Base lines are padded with spaces if needed, and the widget
+// content replaces (not shifts) the characters at that position.
+func (m Model) placeOverlay(base string) string {
 	widget := m.OverlayWidget()
 	if widget == "" || m.width == 0 || m.height == 0 {
-		return ""
+		return base
 	}
 
 	style := lipgloss.NewStyle().
@@ -58,33 +67,102 @@ func (m Model) renderCornerOverlay() string {
 		Padding(0, 1)
 
 	rendered := style.Render(widget)
-	rw := lipgloss.Width(rendered)
-	rh := strings.Count(rendered, "\n") + 1
 
 	corner := m.cfg.Display.OverlayCorner
 
-	var row, col int
+	baseLines := strings.Split(base, "\n")
+	widgetLines := strings.Split(rendered, "\n")
+	rh := len(widgetLines)
+	rw := lipgloss.Width(rendered)
+
+	// Compute the top-left row/col (0-indexed) where the widget should appear.
+	var startRow, startCol int
 	switch corner {
 	case "top-left":
-		row, col = 1, 1
+		startRow, startCol = 0, 0
 	case "top-right":
-		row, col = 1, m.width-rw+1
+		startRow, startCol = 0, m.width-rw
 	case "bottom-left":
-		row, col = m.height-rh, 1
+		startRow, startCol = len(baseLines)-rh, 0
 	default: // "bottom-right"
-		row, col = m.height-rh, m.width-rw+1
+		startRow, startCol = len(baseLines)-rh, m.width-rw
 	}
-	if col < 1 {
-		col = 1
+	if startCol < 0 {
+		startCol = 0
 	}
-	if row < 1 {
-		row = 1
+	if startRow < 0 {
+		startRow = 0
 	}
 
-	return "\033[s" +
-		"\033[" + itoa(row) + ";" + itoa(col) + "H" +
-		rendered +
-		"\033[u"
+	for i, wLine := range widgetLines {
+		row := startRow + i
+		if row < 0 || row >= len(baseLines) {
+			continue
+		}
+		baseLines[row] = spliceVisual(baseLines[row], startCol, wLine, m.width)
+	}
+
+	return strings.Join(baseLines, "\n")
+}
+
+// spliceVisual replaces visual columns [col, col+visualWidth(overlay)) in base
+// with overlay. The line is padded to totalWidth if needed. ANSI SGR escape
+// sequences in base are passed through without advancing the visual column
+// counter so that colour codes before the splice point are preserved correctly.
+func spliceVisual(base string, col int, overlay string, totalWidth int) string {
+	overlayW := lipgloss.Width(overlay)
+	spliceEnd := col + overlayW
+
+	// Walk the base rune-by-rune (with ANSI escape passthrough) and collect:
+	//   left  — visual columns [0, col)
+	//   right — visual columns [spliceEnd, ...)
+	var left, right strings.Builder
+	visCol := 0
+
+	for i := 0; i < len(base); {
+		// Detect an ANSI escape sequence and pass it through intact.
+		if base[i] == '\033' {
+			end := i + 1
+			for end < len(base) && base[end] != 'm' {
+				end++
+			}
+			if end < len(base) {
+				end++ // include the terminating 'm'
+			}
+			seq := base[i:end]
+			if visCol <= col {
+				left.WriteString(seq)
+			} else {
+				right.WriteString(seq)
+			}
+			i = end
+			continue
+		}
+
+		// Ordinary visible character.
+		r, size := []rune(base[i:])[0], len(string([]rune(base[i:])[0:1]))
+		if visCol < col {
+			left.WriteRune(r)
+		} else if visCol >= spliceEnd {
+			right.WriteRune(r)
+		}
+		// else: this character falls inside the splice region — discard it.
+		visCol++
+		i += size
+	}
+
+	// If base was narrower than col, pad left to reach the splice point.
+	if visCol < col {
+		left.WriteString(strings.Repeat(" ", col-visCol))
+	}
+
+	result := left.String() + overlay + right.String()
+
+	// Pad the full line to totalWidth with spaces if shorter.
+	if rw := lipgloss.Width(result); rw < totalWidth {
+		result += strings.Repeat(" ", totalWidth-rw)
+	}
+	return result
 }
 
 // ─── Task List ────────────────────────────────────────────────────────────────
@@ -171,8 +249,7 @@ func (m Model) renderTaskList() string {
 		m.keys.close + " quit",
 	}))
 
-	b.WriteString(m.renderCornerOverlay())
-	return b.String()
+	return m.placeOverlay(b.String())
 }
 
 func (m Model) renderTaskRow(t storage.Task, selected bool) string {
@@ -306,8 +383,7 @@ func (m Model) renderTimerScreen() string {
 		m.keys.close + " back to list",
 	}))
 
-	b.WriteString(m.renderCornerOverlay())
-	return b.String()
+	return m.placeOverlay(b.String())
 }
 
 func bigTime(s string) string {
