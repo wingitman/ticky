@@ -25,6 +25,8 @@ type Keybinds struct {
 	Group     string `toml:"group"`
 	Report    string `toml:"report"`
 	Completed string `toml:"completed"`
+	Increase  string `toml:"increase"`
+	Decrease  string `toml:"decrease"`
 }
 
 // Display holds display preferences.
@@ -86,6 +88,8 @@ func Default() *Config {
 			Group:     "g",
 			Report:    "r",
 			Completed: "h",
+			Increase:  "right",
+			Decrease:  "left",
 		},
 		Display: Display{
 			TimeFormat:              "minutes",
@@ -186,7 +190,9 @@ func needsMigration(path string) bool {
 		!containsStr(content, "stop") ||
 		!containsStr(content, "break_prompt_debounce") ||
 		!containsStr(content, "show_completion_animation") ||
-		!containsStr(content, "auto_start_break")
+		!containsStr(content, "auto_start_break") ||
+		!containsStr(content, "increase") ||
+		!containsStr(content, "decrease")
 }
 
 func containsStr(s, sub string) bool {
@@ -220,6 +226,8 @@ func migratedTOML(cfg *Config) string {
 		"[keybinds]\n" +
 		"up        = " + quote(k.Up) + "      # move selection up\n" +
 		"down      = " + quote(k.Down) + "    # move selection down\n" +
+		"increase  = " + quote(k.Increase) + "     # increase value (timer +1m, adjust numeric fields)\n" +
+		"decrease  = " + quote(k.Decrease) + "      # decrease value (timer -1m, adjust numeric fields)\n" +
 		"edit      = " + quote(k.Edit) + "       # edit selected task\n" +
 		"confirm   = " + quote(k.Confirm) + "   # save / confirm\n" +
 		"start     = " + quote(k.Start) + "   # start selected task timer\n" +
@@ -323,6 +331,8 @@ func defaultTOML() string {
 [keybinds]
 up        = "up"      # move selection up
 down      = "down"    # move selection down
+increase  = "right"   # increase value (timer +1m, adjust numeric fields)
+decrease  = "left"    # decrease value (timer -1m, adjust numeric fields)
 edit      = "e"       # edit selected task
 confirm   = "enter"   # save / confirm
 start     = "enter"   # start selected task timer

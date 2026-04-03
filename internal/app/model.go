@@ -72,6 +72,8 @@ type resolvedKeys struct {
 	group     string
 	report    string
 	completed string
+	increase  string
+	decrease  string
 }
 
 func resolveKeys(k config.Keybinds) resolvedKeys {
@@ -91,6 +93,8 @@ func resolveKeys(k config.Keybinds) resolvedKeys {
 		group:     k.Group,
 		report:    k.Report,
 		completed: k.Completed,
+		increase:  k.Increase,
+		decrease:  k.Decrease,
 	}
 }
 
@@ -412,12 +416,16 @@ func (m Model) handleSessionPoll() (tea.Model, tea.Cmd) {
 		return m, pollSessionCmd()
 	}
 
-	// Session was cleared by another client — stop everything.
+	// Session was cleared by another client (or by this client completing the
+	// timer). Only reset to task list if we're still on a timer screen — don't
+	// clobber ModeBreakPrompt or any other post-timer mode.
 	if !session.IsActive(disk) && m.activeTaskIdx >= 0 {
 		m.tmr.Pause() // stop ticking
 		m.activeTaskIdx = -1
 		m.sess = &session.Session{}
-		m.mode = ModeTaskList
+		if m.mode == ModeTimerFocus || m.mode == ModeTimerBreak {
+			m.mode = ModeTaskList
+		}
 		return m, nil
 	}
 
@@ -539,6 +547,46 @@ func (m Model) updateTaskList(key string) (tea.Model, tea.Cmd) {
 		if m.activeTaskIdx >= 0 && len(tasks) > 0 && m.cursor < len(tasks) &&
 			m.store.Tasks[m.activeTaskIdx].ID == tasks[m.cursor].ID {
 			return m.stopTask()
+		}
+
+	case matchKey(key, m.keys.increase) || key == "+":
+		if len(tasks) > 0 && m.cursor < len(tasks) {
+			selected := tasks[m.cursor]
+			if m.activeTaskIdx >= 0 && m.store.Tasks[m.activeTaskIdx].ID == selected.ID {
+				// Active task — adjust the running timer.
+				m, cmd := m.adjustRunningTimer(+1)
+				return m, cmd
+			}
+			// Inactive task — adjust its stored focus time.
+			for i := range m.store.Tasks {
+				if m.store.Tasks[i].ID == selected.ID {
+					if m.store.Tasks[i].FocusTime < 480 {
+						m.store.Tasks[i].FocusTime++
+					}
+					break
+				}
+			}
+			return m, saveCmd(m.store)
+		}
+
+	case matchKey(key, m.keys.decrease) || key == "-":
+		if len(tasks) > 0 && m.cursor < len(tasks) {
+			selected := tasks[m.cursor]
+			if m.activeTaskIdx >= 0 && m.store.Tasks[m.activeTaskIdx].ID == selected.ID {
+				// Active task — adjust the running timer.
+				m, cmd := m.adjustRunningTimer(-1)
+				return m, cmd
+			}
+			// Inactive task — adjust its stored focus time.
+			for i := range m.store.Tasks {
+				if m.store.Tasks[i].ID == selected.ID {
+					if m.store.Tasks[i].FocusTime > 0 {
+						m.store.Tasks[i].FocusTime--
+					}
+					break
+				}
+			}
+			return m, saveCmd(m.store)
 		}
 
 	case matchKey(key, m.keys.start):
@@ -736,6 +784,14 @@ func (m Model) updateTaskActions(key string) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case matchKey(key, m.keys.increase) || key == "+":
+		m, cmd := m.adjustRunningTimer(+1)
+		return m, cmd
+
+	case matchKey(key, m.keys.decrease) || key == "-":
+		m, cmd := m.adjustRunningTimer(-1)
+		return m, cmd
+
 	case matchKey(key, m.keys.confirm):
 		return m.executeTaskAction(m.actionsCursor)
 
@@ -885,6 +941,14 @@ func (m Model) updateEditTask(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case matchKey(key, m.keys.confirm):
 		m.groupSuggestions = nil
 		return m.commitEditTask()
+
+	case matchKey(key, m.keys.increase) || key == "+":
+		m.adjustEditNumericField(+1)
+		return m, nil
+
+	case matchKey(key, m.keys.decrease) || key == "-":
+		m.adjustEditNumericField(-1)
+		return m, nil
 	}
 
 	if matchKey(key, m.keys.up) {
@@ -903,6 +967,33 @@ func (m Model) updateEditTask(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+// adjustEditNumericField increments or decrements the value of the currently
+// selected numeric field (FocusTime or BreakTime) by delta. No-op on text fields.
+func (m *Model) adjustEditNumericField(delta int) {
+	switch m.editField {
+	case fieldFocusTime:
+		v := parseIntClamped(m.editInputs[fieldFocusTime].Value(), 25, 0, 480)
+		v += delta
+		if v < 0 {
+			v = 0
+		}
+		if v > 480 {
+			v = 480
+		}
+		m.editInputs[fieldFocusTime].SetValue(itoa(v))
+	case fieldBreakTime:
+		v := parseIntClamped(m.editInputs[fieldBreakTime].Value(), 5, 0, 60)
+		v += delta
+		if v < 0 {
+			v = 0
+		}
+		if v > 60 {
+			v = 60
+		}
+		m.editInputs[fieldBreakTime].SetValue(itoa(v))
+	}
 }
 
 func (m Model) commitEditTask() (tea.Model, tea.Cmd) {
@@ -1026,6 +1117,14 @@ func (m Model) updateTimer(key string) (tea.Model, tea.Cmd) {
 	case matchKey(key, m.keys.stop):
 		return m.stopTask()
 
+	case matchKey(key, m.keys.increase) || key == "+":
+		m, cmd := m.adjustRunningTimer(+1)
+		return m, tea.Batch(tickCmd(), cmd)
+
+	case matchKey(key, m.keys.decrease) || key == "-":
+		m, cmd := m.adjustRunningTimer(-1)
+		return m, tea.Batch(tickCmd(), cmd)
+
 	case matchKey(key, m.keys.close), key == "esc":
 		// Leave timer running in background, return to task list.
 		m.mode = ModeTaskList
@@ -1121,11 +1220,11 @@ func (m Model) updateBreakPrompt(key string) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case key == "left" || key == "-":
+	case matchKey(key, m.keys.decrease) || key == "-":
 		m.adjustBreakPromptValue(-1)
 		return m, nil
 
-	case key == "right" || key == "+":
+	case matchKey(key, m.keys.increase) || key == "+":
 		m.adjustBreakPromptValue(+1)
 		return m, nil
 
@@ -1224,6 +1323,22 @@ func (m Model) startBreakWithDuration(breakMin int) (Model, tea.Cmd) {
 	m.afterBreak = false
 	m.mode = ModeTimerBreak
 	return m, tea.Batch(tickCmd(), pollSessionCmd(), saveSessionCmd(m.sess), launchWatcherCmd(m.sess))
+}
+
+// adjustRunningTimer adds deltaMins (positive or negative) minutes to the
+// active running timer and persists the new end time to the session file.
+// Returns the updated commands or nil if no active session.
+func (m Model) adjustRunningTimer(deltaMins int) (Model, tea.Cmd) {
+	if m.sess == nil || !session.IsActive(m.sess) {
+		return m, nil
+	}
+	d := time.Duration(deltaMins) * time.Minute
+	m.tmr.Remaining += d
+	if m.tmr.Remaining < time.Second {
+		m.tmr.Remaining = time.Second
+	}
+	m.sess.EndTime = time.Now().Add(m.tmr.Remaining)
+	return m, tea.Batch(saveSessionCmd(m.sess), launchWatcherCmd(m.sess))
 }
 
 // ─── ModeReport ───────────────────────────────────────────────────────────────

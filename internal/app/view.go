@@ -241,6 +241,7 @@ func (m Model) renderTaskList() string {
 		m.keys.edit + " edit/actions",
 		m.keys.delete + " delete",
 		m.keys.start + " start",
+		m.keys.increase + "/" + m.keys.decrease + " ±1m",
 		m.keys.group + " groups",
 		m.keys.report + " report",
 		m.keys.completed + " completed",
@@ -328,7 +329,7 @@ func (m Model) renderTaskActions() string {
 		content = ui.StyleHeader.Render("TASK ACTIONS") + "\n\n" +
 			ui.StyleMuted.Render(taskName) + "\n\n" +
 			menu + "\n" +
-			ui.StyleMuted.Render(m.keys.up+"/"+m.keys.down+" select  ·  "+m.keys.confirm+" confirm  ·  "+m.keys.close+" back")
+			ui.StyleMuted.Render(m.keys.up+"/"+m.keys.down+" select  ·  "+m.keys.confirm+" confirm  ·  "+m.keys.increase+"/"+m.keys.decrease+" ±1m  ·  "+m.keys.close+" back")
 	}
 
 	box := ui.StyleBreakBox.Width(m.width - 8).Render(content)
@@ -380,6 +381,7 @@ func (m Model) renderTimerScreen() string {
 	b.WriteString(m.renderStatusBar([]string{
 		m.keys.pause + " pause",
 		m.keys.stop + " stop",
+		m.keys.increase + "/" + m.keys.decrease + " ±1m",
 		m.keys.close + " back to list",
 	}))
 
@@ -597,6 +599,9 @@ func (m Model) renderEditTask() string {
 		hint = m.keys.confirm + " confirm  ·  " + m.keys.close + " cancel"
 	} else {
 		hint = m.keys.up + "/" + m.keys.down + " select  ·  " + m.keys.edit + " edit  ·  " + m.keys.confirm + " save  ·  " + m.keys.close + " cancel"
+		if m.editField == fieldFocusTime || m.editField == fieldBreakTime {
+			hint += "  ·  " + m.keys.increase + "/" + m.keys.decrease + " ±1"
+		}
 	}
 	b.WriteString(m.renderStatusBar([]string{hint}))
 	return b.String()
