@@ -224,30 +224,34 @@ func (m Model) renderTaskActions() string {
 		content = ui.StyleHeader.Render("TASK ACTIONS") + "\n\n" +
 			ui.StyleMuted.Render(taskName) + "\n\n" +
 			ui.StyleWarning.Render("Mark task as complete?") + "\n\n" +
-			ui.StyleStatusKey.Render("[Y]") + " Yes, complete it\n" +
-			ui.StyleStatusKey.Render("[N]") + " No, go back\n" +
-			ui.StyleStatusKey.Render("[esc]") + " Cancel"
+			ui.StyleStatusKey.Render("["+m.keys.confirm+"]") + " Yes, complete it\n" +
+			ui.StyleStatusKey.Render("["+m.keys.close+"]") + " No, go back"
 
 	case confirmAbandon:
 		content = ui.StyleHeader.Render("TASK ACTIONS") + "\n\n" +
 			ui.StyleMuted.Render(taskName) + "\n\n" +
 			ui.StyleWarning.Render("Abandon this task?") + "\n\n" +
-			ui.StyleStatusKey.Render("[Y]") + " Yes, abandon it\n" +
-			ui.StyleStatusKey.Render("[N]") + " No, go back\n" +
-			ui.StyleStatusKey.Render("[esc]") + " Cancel"
+			ui.StyleStatusKey.Render("["+m.keys.confirm+"]") + " Yes, abandon it\n" +
+			ui.StyleStatusKey.Render("["+m.keys.close+"]") + " No, go back"
 
 	default:
-		pauseLabel := "[P] Pause"
+		pauseOrResume := "Pause timer"
 		if m.tmr.State == timer.StatePaused {
-			pauseLabel = "[R] Resume"
+			pauseOrResume = "Resume timer"
+		}
+		opts := []string{pauseOrResume, "Stop & reset", "Complete task", "Abandon task"}
+		var menu string
+		for i, opt := range opts {
+			if i == m.actionsCursor {
+				menu += ui.StyleStatusKey.Render("> ") + opt + "\n"
+			} else {
+				menu += ui.StyleMuted.Render("  ") + opt + "\n"
+			}
 		}
 		content = ui.StyleHeader.Render("TASK ACTIONS") + "\n\n" +
 			ui.StyleMuted.Render(taskName) + "\n\n" +
-			ui.StyleStatusKey.Render(pauseLabel) + "\n" +
-			ui.StyleStatusKey.Render("[S]") + " Stop & reset\n" +
-			ui.StyleStatusKey.Render("[C]") + " Complete task\n" +
-			ui.StyleStatusKey.Render("[A]") + " Abandon task\n\n" +
-			ui.StyleMuted.Render("esc") + " back"
+			menu + "\n" +
+			ui.StyleMuted.Render(m.keys.up+"/"+m.keys.down+" select  ·  "+m.keys.confirm+" confirm  ·  "+m.keys.close+" back")
 	}
 
 	box := ui.StyleBreakBox.Width(m.width - 8).Render(content)
@@ -332,8 +336,8 @@ func (m Model) renderPausePrompt() string {
 		ui.StyleMuted.Render(taskName) + "\n\n" +
 		"Why are you pausing?\n" +
 		m.pauseInput.View() + "\n\n" +
-		ui.StyleMuted.Render("enter") + " resume  " +
-		ui.StyleMuted.Render("esc") + " resume without recording"
+		ui.StyleMuted.Render(m.keys.confirm) + " resume  " +
+		ui.StyleMuted.Render(m.keys.close) + " resume without recording"
 
 	box := ui.StyleBox.Width(m.width - 8).Render(content)
 	b.WriteString("\n")
@@ -372,17 +376,52 @@ func (m Model) renderBreakPrompt() string {
 	var actions string
 	if debounceRem > 0 {
 		actions = ui.StyleMuted.Render("Keys active in " + itoa(debounceRem) + "s…")
+	} else if m.afterBreak {
+		// After break: 0=Complete, 1=Abandon
+		opts := []string{"Complete task", "Abandon task"}
+		cursor := m.breakPromptCursor
+		if cursor >= len(opts) {
+			cursor = len(opts) - 1
+		}
+		for i, opt := range opts {
+			if i == cursor {
+				actions += ui.StyleStatusKey.Render("> ") + opt + "\n"
+			} else {
+				actions += ui.StyleMuted.Render("  ") + opt + "\n"
+			}
+		}
 	} else {
-		if m.afterBreak {
-			// After a break: extend and re-break don't make sense.
-			actions = ui.StyleStatusKey.Render("[E]") + " Extend focus +5m\n" +
-				ui.StyleStatusKey.Render("[C]") + " Complete task\n" +
-				ui.StyleStatusKey.Render("[A]") + " Abandon task"
-		} else {
-			actions = ui.StyleStatusKey.Render("[E]") + " Extend focus +5m\n" +
-				ui.StyleStatusKey.Render("[B]") + " Start break\n" +
-				ui.StyleStatusKey.Render("[C]") + " Complete task\n" +
-				ui.StyleStatusKey.Render("[A]") + " Abandon task"
+		// Focus prompt: 0=Break, 1=Extend, 2=Complete, 3=Abandon
+		type option struct {
+			label      string
+			adjustable bool
+			value      int
+		}
+		opts := []option{
+			{"Start break", true, m.breakDurationMins},
+			{"Extend focus", true, m.breakExtendMins},
+			{"Complete task", false, 0},
+			{"Abandon task", false, 0},
+		}
+		for i, opt := range opts {
+			var line string
+			if i == m.breakPromptCursor {
+				if opt.adjustable {
+					line = ui.StyleStatusKey.Render("> ") + opt.label + "  " +
+						ui.StyleMuted.Render("◀") + " " +
+						ui.StyleStatusKey.Render(itoa(opt.value)+"m") + " " +
+						ui.StyleMuted.Render("▶")
+				} else {
+					line = ui.StyleStatusKey.Render("> ") + opt.label
+				}
+			} else {
+				if opt.adjustable {
+					line = ui.StyleMuted.Render("  " + opt.label + "  " + itoa(opt.value) + "m")
+				} else {
+					line = ui.StyleMuted.Render("  " + opt.label)
+				}
+			}
+			actions += line + "\n"
 		}
 	}
 
@@ -392,10 +431,20 @@ func (m Model) renderBreakPrompt() string {
 		autoHint = "\n" + ui.StyleMuted.Render("Break auto-starts after debounce — press any key to cancel")
 	}
 
+	var hint string
+	if debounceRem <= 0 {
+		adjHint := ""
+		if !m.afterBreak && m.breakPromptCursor <= 1 {
+			adjHint = "  ·  ◀/▶ or -/+ adjust"
+		}
+		hint = m.keys.up + "/" + m.keys.down + " select  ·  " + m.keys.confirm + " confirm" + adjHint
+	}
+
 	content := header + "\n\n" +
 		ui.StyleHeader.Render(taskName) + "\n" +
 		ui.StyleMuted.Render("Elapsed: "+elapsed) + "\n\n" +
-		actions + autoHint
+		actions + autoHint + "\n\n" +
+		ui.StyleMuted.Render(hint)
 
 	box := ui.StyleBreakBox.Width(m.width - 8).Render(content)
 	b.WriteString("\n")
@@ -417,7 +466,7 @@ func (m Model) renderEditTask() string {
 	b.WriteString(m.renderBanner(title, ui.StyleHeader))
 	b.WriteString("\n")
 
-	labels := []string{"Name", "Focus (min)", "Break (min)", "Group"}
+	labels := []string{"Group", "Name", "Focus (min)", "Break (min)"}
 	for i, inp := range m.editInputs {
 		label := labels[i]
 		isSelected := editField(i) == m.editField
@@ -447,11 +496,31 @@ func (m Model) renderEditTask() string {
 
 	b.WriteString("\n")
 
+	if m.editField == fieldGroup {
+		b.WriteString("\n")
+		if len(m.groupSuggestions) > 0 {
+			if m.editActive && m.editInputs[fieldGroup].Value() != "" {
+				b.WriteString(ui.StyleMuted.Render("  Matches:") + "\n")
+			} else {
+				b.WriteString(ui.StyleMuted.Render("  Groups:") + "\n")
+			}
+			for _, sug := range m.groupSuggestions {
+				b.WriteString(ui.StyleMuted.Render("    · ") + ui.StyleStatusKey.Render(sug) + "\n")
+			}
+		} else if len(m.store.Groups) == 0 {
+			b.WriteString(ui.StyleMuted.Render("  No groups yet — type a name to create one") + "\n")
+		} else {
+			b.WriteString(ui.StyleMuted.Render("  No matches") + "\n")
+		}
+	}
+
+	b.WriteString("\n")
+
 	var hint string
 	if m.editActive {
-		hint = "enter/esc done editing"
+		hint = m.keys.confirm + " confirm  ·  " + m.keys.close + " cancel"
 	} else {
-		hint = m.keys.up + "/" + m.keys.down + " select  ·  enter edit  ·  enter on last field saves  ·  esc cancel"
+		hint = m.keys.up + "/" + m.keys.down + " select  ·  " + m.keys.edit + " edit  ·  " + m.keys.confirm + " save  ·  " + m.keys.close + " cancel"
 	}
 	b.WriteString(m.renderStatusBar([]string{hint}))
 	return b.String()

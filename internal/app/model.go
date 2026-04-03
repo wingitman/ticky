@@ -2,6 +2,7 @@ package app
 
 import (
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -38,10 +39,10 @@ const (
 type editField int
 
 const (
-	fieldName editField = iota
+	fieldGroup editField = iota
+	fieldName
 	fieldFocusTime
 	fieldBreakTime
-	fieldGroup
 	fieldCount // sentinel
 )
 
@@ -123,10 +124,11 @@ type Model struct {
 	tmr timer.Timer
 
 	// Edit form state
-	editingTaskID string
-	editField     editField
-	editActive    bool // true while a text input is being edited (vs. navigating)
-	editInputs    [fieldCount]textinput.Model
+	editingTaskID    string
+	editField        editField
+	editActive       bool // true while a text input is being edited (vs. navigating)
+	editInputs       [fieldCount]textinput.Model
+	groupSuggestions []string
 
 	// Group list state
 	groupCursor int
@@ -138,11 +140,16 @@ type Model struct {
 
 	// Task actions sub-menu
 	actionsConfirm taskActionsConfirm
+	actionsCursor  int // selected item in the actions menu (0=pause/resume, 1=stop, 2=complete, 3=abandon)
 
 	// Break prompt state
 	breakPromptEnteredAt time.Time // when ModeBreakPrompt was entered (for debounce)
 	afterBreak           bool      // true when coming from a completed break (not focus)
 	autoBreakScheduled   bool      // true when auto_start_break countdown is running
+	// Cursor: 0=break, 1=extend, 2=complete, 3=abandon  (afterBreak: 0=complete, 1=abandon)
+	breakPromptCursor int
+	breakExtendMins   int // minutes to extend focus (default 5)
+	breakDurationMins int // override break duration (0 = use task default)
 
 	// Completion animation state
 	completionFrame    int
@@ -185,10 +192,10 @@ func New(cfg *config.Config, store *storage.Store, sess *session.Session) Model 
 		ti.CharLimit = 120
 		inputs[i] = ti
 	}
-	inputs[fieldName].Placeholder = "Task name"
-	inputs[fieldFocusTime].Placeholder = "Focus minutes (1–480, e.g. 25)"
-	inputs[fieldBreakTime].Placeholder = "Break minutes (1–60, e.g. 5)"
 	inputs[fieldGroup].Placeholder = "Group name (optional)"
+	inputs[fieldName].Placeholder = "Task name"
+	inputs[fieldFocusTime].Placeholder = "Focus minutes (0–480, e.g. 25)"
+	inputs[fieldBreakTime].Placeholder = "Break minutes (0–60, e.g. 5)"
 
 	pauseInput := textinput.New()
 	pauseInput.Placeholder = "Reason for pausing…"
@@ -376,6 +383,9 @@ func (m Model) handleTick() (tea.Model, tea.Cmd) {
 		m.breakPromptEnteredAt = time.Now()
 		m.afterBreak = false
 		m.autoBreakScheduled = false
+		m.breakPromptCursor = 0 // default: Break
+		m.breakExtendMins = 5
+		m.breakDurationMins = m.taskBreakMin()
 		return m, m.breakPromptInitCmd()
 	}
 
@@ -386,6 +396,9 @@ func (m Model) handleTick() (tea.Model, tea.Cmd) {
 	m.breakPromptEnteredAt = time.Now()
 	m.afterBreak = true
 	m.autoBreakScheduled = false
+	m.breakPromptCursor = 0 // default: Complete
+	m.breakExtendMins = 5
+	m.breakDurationMins = m.taskBreakMin()
 	return m, m.breakPromptInitCmd()
 }
 
@@ -683,54 +696,72 @@ func (m Model) startTask(id string) (tea.Model, tea.Cmd) {
 
 // ─── ModeTaskActions ──────────────────────────────────────────────────────────
 
+// taskActionsOptions returns the ordered list of actions for the current state.
+// 0 = Pause or Resume, 1 = Stop, 2 = Complete, 3 = Abandon
+func (m Model) taskActionsOptionCount() int { return 4 }
+
 func (m Model) updateTaskActions(key string) (tea.Model, tea.Cmd) {
+	// Confirm sub-prompts: use confirm/close keys.
 	switch m.actionsConfirm {
 	case confirmComplete:
-		switch key {
-		case "y", "Y":
+		switch {
+		case matchKey(key, m.keys.confirm):
 			return m.completeTask()
-		case "n", "N", "esc":
+		case matchKey(key, m.keys.close):
 			m.actionsConfirm = confirmNone
 		}
 		return m, nil
 
 	case confirmAbandon:
-		switch key {
-		case "y", "Y":
+		switch {
+		case matchKey(key, m.keys.confirm):
 			return m.abandonTask()
-		case "n", "N", "esc":
+		case matchKey(key, m.keys.close):
 			m.actionsConfirm = confirmNone
 		}
 		return m, nil
 	}
 
-	// Main actions menu.
-	switch key {
-	case "p", "P":
-		m.mode = ModeTaskList
-		return m.pauseTimer()
-
-	case "r", "R":
-		// Resume (only shown when paused).
-		if m.tmr.State == timer.StatePaused {
-			m.mode = ModeTaskList
-			return m.resumeTimer()
+	// Main navigable menu.
+	switch {
+	case matchKey(key, m.keys.up):
+		if m.actionsCursor > 0 {
+			m.actionsCursor--
 		}
+		return m, nil
 
-	case "s", "S":
-		m.mode = ModeTaskList
-		return m.stopTask()
+	case matchKey(key, m.keys.down):
+		if m.actionsCursor < m.taskActionsOptionCount()-1 {
+			m.actionsCursor++
+		}
+		return m, nil
 
-	case "c", "C":
-		m.actionsConfirm = confirmComplete
+	case matchKey(key, m.keys.confirm):
+		return m.executeTaskAction(m.actionsCursor)
 
-	case "a", "A":
-		m.actionsConfirm = confirmAbandon
-
-	case "esc", "q":
+	case matchKey(key, m.keys.close):
 		m.mode = ModeTaskList
 	}
 
+	return m, nil
+}
+
+func (m Model) executeTaskAction(idx int) (tea.Model, tea.Cmd) {
+	switch idx {
+	case 0: // Pause or Resume
+		m.mode = ModeTaskList
+		if m.tmr.State == timer.StatePaused {
+			return m.resumeTimer()
+		}
+		return m.pauseTimer()
+	case 1: // Stop
+		m.mode = ModeTaskList
+		return m.stopTask()
+	case 2: // Complete
+		m.actionsConfirm = confirmComplete
+	case 3: // Abandon
+		m.actionsConfirm = confirmAbandon
+	}
 	return m, nil
 }
 
@@ -782,7 +813,7 @@ func (m Model) abandonTask() (Model, tea.Cmd) {
 
 func (m Model) beginEditTask(id string) Model {
 	m.editingTaskID = id
-	m.editField = fieldName
+	m.editField = fieldGroup
 	m.editActive = false
 
 	for i := range m.editInputs {
@@ -793,18 +824,20 @@ func (m Model) beginEditTask(id string) Model {
 	if id != "" {
 		for _, t := range m.store.Tasks {
 			if t.ID == id {
-				m.editInputs[fieldName].SetValue(t.Name)
-				m.editInputs[fieldFocusTime].SetValue(itoa(t.FocusTime))
-				m.editInputs[fieldBreakTime].SetValue(itoa(t.BreakTime))
 				if g := storage.FindGroup(m.store, t.GroupID); g != nil {
 					m.editInputs[fieldGroup].SetValue(g.Name)
 				}
+				m.editInputs[fieldName].SetValue(t.Name)
+				m.editInputs[fieldFocusTime].SetValue(itoa(t.FocusTime))
+				m.editInputs[fieldBreakTime].SetValue(itoa(t.BreakTime))
 				break
 			}
 		}
 	}
 
 	m.mode = ModeEditTask
+	// Pre-populate group suggestions so they show immediately when the form opens.
+	m.groupSuggestions = m.getGroupSuggestions(m.editInputs[fieldGroup].Value())
 	return m
 }
 
@@ -812,54 +845,60 @@ func (m Model) updateEditTask(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
 	if m.editActive {
-		// Currently editing a field — only enter/esc exit editing mode.
-		switch key {
-		case "enter":
-			// Exit editing mode and stay on this field.
+		switch {
+		case matchKey(key, m.keys.confirm):
 			m.editInputs[m.editField].Blur()
 			m.editActive = false
+			m.groupSuggestions = nil
 			return m, nil
-		case "esc":
+		case matchKey(key, m.keys.close):
 			m.editInputs[m.editField].Blur()
 			m.editActive = false
+			m.groupSuggestions = nil
 			return m, nil
 		}
-		// Forward all other keys to the active input.
 		var cmd tea.Cmd
 		m.editInputs[m.editField], cmd = m.editInputs[m.editField].Update(msg)
+
+		if m.editField == fieldGroup {
+			m.groupSuggestions = m.getGroupSuggestions(m.editInputs[fieldGroup].Value())
+		}
 		return m, cmd
 	}
 
-	// Navigation mode.
-	switch key {
-	case "esc":
+	switch {
+	case matchKey(key, m.keys.close):
 		m.mode = ModeTaskList
+		m.groupSuggestions = nil
 		return m, nil
 
-	case "enter":
-		// On the last field, enter saves the form. On other fields, enter
-		// activates the input for editing.
-		if m.editField == fieldCount-1 {
-			return m.commitEditTask()
-		}
+	case matchKey(key, m.keys.edit):
 		m.editActive = true
 		m.editInputs[m.editField].Focus()
+		if m.editField == fieldGroup {
+			m.groupSuggestions = m.getGroupSuggestions(m.editInputs[fieldGroup].Value())
+		}
 		var cmd tea.Cmd
 		m.editInputs[m.editField], cmd = m.editInputs[m.editField].Update(msg)
 		return m, tea.Batch(cmd, textinput.Blink)
+
+	case matchKey(key, m.keys.confirm):
+		m.groupSuggestions = nil
+		return m.commitEditTask()
 	}
 
-	// Up/down navigation between fields.
 	if matchKey(key, m.keys.up) {
 		if m.editField > 0 {
 			m.editField--
 		}
+		m.groupSuggestions = m.groupSuggestionsForField()
 		return m, nil
 	}
 	if matchKey(key, m.keys.down) {
 		if m.editField < fieldCount-1 {
 			m.editField++
 		}
+		m.groupSuggestions = m.groupSuggestionsForField()
 		return m, nil
 	}
 
@@ -873,8 +912,8 @@ func (m Model) commitEditTask() (tea.Model, tea.Cmd) {
 		return m, clearStatusCmd()
 	}
 
-	focusMin := parseIntClamped(m.editInputs[fieldFocusTime].Value(), 25, 1, 480)
-	breakMin := parseIntClamped(m.editInputs[fieldBreakTime].Value(), 5, 1, 60)
+	focusMin := parseIntClamped(m.editInputs[fieldFocusTime].Value(), 25, 0, 480)
+	breakMin := parseIntClamped(m.editInputs[fieldBreakTime].Value(), 5, 0, 60)
 
 	groupName := m.editInputs[fieldGroup].Value()
 	groupID := ""
@@ -1004,10 +1043,10 @@ func (m Model) updateTimer(key string) (tea.Model, tea.Cmd) {
 func (m Model) updatePausePrompt(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
-	switch key {
-	case "enter", "esc":
+	switch {
+	case matchKey(key, m.keys.confirm):
 		reason := m.pauseInput.Value()
-		if key == "enter" && reason != "" && m.activeTaskIdx >= 0 && m.activeTaskIdx < len(m.store.Tasks) {
+		if reason != "" && m.activeTaskIdx >= 0 && m.activeTaskIdx < len(m.store.Tasks) {
 			interrupt := storage.Interrupt{
 				Time:   time.Now(),
 				Reason: reason,
@@ -1018,7 +1057,12 @@ func (m Model) updatePausePrompt(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			_ = storage.Save(m.store)
 		}
 		m.pauseInput.SetValue("")
-		m.pauseInput.Blur()
+		m.mode = ModeTaskList
+		return m.resumeTimer()
+
+	case matchKey(key, m.keys.close):
+		m.pauseInput.SetValue("")
+		m.mode = ModeTaskList
 		return m.resumeTimer()
 	}
 
@@ -1044,23 +1088,95 @@ func (m Model) breakPromptInitCmd() tea.Cmd {
 	return nil
 }
 
+// breakPromptOptionCount returns the number of selectable options.
+// Focus: 0=Break, 1=Extend, 2=Complete, 3=Abandon
+// After break: 0=Complete, 1=Abandon
+func (m Model) breakPromptOptionCount() int {
+	if m.afterBreak {
+		return 2
+	}
+	return 4
+}
+
 func (m Model) updateBreakPrompt(key string) (tea.Model, tea.Cmd) {
-	// Enforce debounce — ignore keypresses until the window has been open long enough.
 	debounce := time.Duration(m.cfg.Display.BreakPromptDebounce) * time.Second
 	if debounce > 0 && time.Since(m.breakPromptEnteredAt) < debounce {
 		return m, nil
 	}
 
-	// Any key press cancels the auto-start-break countdown.
 	m.autoBreakScheduled = false
 
-	switch key {
-	case "e", "E":
-		if m.afterBreak {
-			return m, nil // no extend after a break
+	maxIdx := m.breakPromptOptionCount() - 1
+
+	switch {
+	case matchKey(key, m.keys.up):
+		if m.breakPromptCursor > 0 {
+			m.breakPromptCursor--
 		}
-		// Extend focus by 5 minutes.
-		m.tmr.Extend(5)
+		return m, nil
+
+	case matchKey(key, m.keys.down):
+		if m.breakPromptCursor < maxIdx {
+			m.breakPromptCursor++
+		}
+		return m, nil
+
+	case key == "left" || key == "-":
+		m.adjustBreakPromptValue(-1)
+		return m, nil
+
+	case key == "right" || key == "+":
+		m.adjustBreakPromptValue(+1)
+		return m, nil
+
+	case matchKey(key, m.keys.confirm):
+		return m.executeBreakPromptOption()
+	}
+
+	return m, nil
+}
+
+// adjustBreakPromptValue increments/decrements the adjustable field for the
+// currently selected option (Extend or Break duration).
+func (m *Model) adjustBreakPromptValue(delta int) {
+	if m.afterBreak {
+		return
+	}
+	switch m.breakPromptCursor {
+	case 0: // Break duration
+		m.breakDurationMins += delta
+		if m.breakDurationMins < 1 {
+			m.breakDurationMins = 1
+		}
+		if m.breakDurationMins > 60 {
+			m.breakDurationMins = 60
+		}
+	case 1: // Extend minutes
+		m.breakExtendMins += delta
+		if m.breakExtendMins < 1 {
+			m.breakExtendMins = 1
+		}
+		if m.breakExtendMins > 60 {
+			m.breakExtendMins = 60
+		}
+	}
+}
+
+func (m Model) executeBreakPromptOption() (tea.Model, tea.Cmd) {
+	if m.afterBreak {
+		// 0=Complete, 1=Abandon
+		if m.breakPromptCursor == 0 {
+			return m.completeTask()
+		}
+		return m.abandonTask()
+	}
+
+	// Focus prompt: 0=Break, 1=Extend, 2=Complete, 3=Abandon
+	switch m.breakPromptCursor {
+	case 0:
+		return m.startBreakWithDuration(m.breakDurationMins)
+	case 1:
+		m.tmr.Extend(m.breakExtendMins)
 		endTime := time.Now().Add(m.tmr.Remaining)
 		if m.sess == nil {
 			m.sess = &session.Session{}
@@ -1070,28 +1186,31 @@ func (m Model) updateBreakPrompt(key string) (tea.Model, tea.Cmd) {
 		m.afterBreak = false
 		m.mode = ModeTimerFocus
 		return m, tea.Batch(tickCmd(), pollSessionCmd(), saveSessionCmd(m.sess), launchWatcherCmd(m.sess))
-
-	case "b", "B":
-		if m.afterBreak {
-			return m, nil // no re-break after a break
-		}
-		return m.startBreak()
-
-	case "c", "C":
+	case 2:
 		return m.completeTask()
-
-	case "a", "A":
+	case 3:
 		return m.abandonTask()
 	}
-
 	return m, nil
 }
 
-// startBreak transitions to a break timer.
-func (m Model) startBreak() (Model, tea.Cmd) {
-	breakMin := 5
+// taskBreakMin returns the task's configured break duration, falling back to 5.
+func (m Model) taskBreakMin() int {
 	if m.activeTaskIdx >= 0 && m.activeTaskIdx < len(m.store.Tasks) {
-		breakMin = m.store.Tasks[m.activeTaskIdx].BreakTime
+		return m.store.Tasks[m.activeTaskIdx].BreakTime
+	}
+	return 5
+}
+
+// startBreak transitions to a break timer using the task's default break duration.
+func (m Model) startBreak() (Model, tea.Cmd) {
+	return m.startBreakWithDuration(m.taskBreakMin())
+}
+
+// startBreakWithDuration transitions to a break timer with the given duration.
+func (m Model) startBreakWithDuration(breakMin int) (Model, tea.Cmd) {
+	if breakMin < 1 {
+		breakMin = 1
 	}
 	m.tmr.StartBreak(breakMin)
 	endTime := time.Now().Add(m.tmr.Remaining)
@@ -1354,6 +1473,67 @@ func (m Model) BreakPromptDebounceRemaining() int {
 		return 0
 	}
 	return int(rem.Seconds()) + 1
+}
+
+// groupSuggestionsForField returns suggestions when the group field is selected
+// (navigation mode), using the current field value as the query.
+func (m Model) groupSuggestionsForField() []string {
+	if m.editField != fieldGroup {
+		return nil
+	}
+	return m.getGroupSuggestions(m.editInputs[fieldGroup].Value())
+}
+
+// getGroupSuggestions returns group names that fuzzy-match the input.
+// When input is empty it returns all group names (up to the cap).
+// Matching is case-insensitive; every character in input must appear in order
+// somewhere in the group name (standard fuzzy / subsequence match).
+func (m Model) getGroupSuggestions(input string) []string {
+	const max = 6
+	if len(m.store.Groups) == 0 {
+		return nil
+	}
+	if input == "" {
+		var all []string
+		for _, g := range m.store.Groups {
+			all = append(all, g.Name)
+			if len(all) >= max {
+				break
+			}
+		}
+		return all
+	}
+	inputLower := strings.ToLower(input)
+	var matches []string
+	for _, g := range m.store.Groups {
+		if fuzzyMatch(inputLower, strings.ToLower(g.Name)) {
+			matches = append(matches, g.Name)
+			if len(matches) >= max {
+				break
+			}
+		}
+	}
+	return matches
+}
+
+// fuzzyMatch returns true when every rune in needle appears in haystack in order.
+func fuzzyMatch(needle, haystack string) bool {
+	hi := 0
+	for _, n := range needle {
+		found := false
+		for hi < len(haystack) {
+			r := rune(haystack[hi])
+			hi++
+			if r == n {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 func parseIntClamped(s string, def, minVal, maxVal int) int {
