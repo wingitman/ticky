@@ -4,9 +4,46 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
+
+// keybindEntries is the single authoritative list of every keybind TOML key
+// name paired with its comment. Order here controls the order written to the
+// config file. When adding a new keybind, add it here — migration and default-
+// filling are derived automatically from this list and from Default().
+var keybindEntries = []struct{ key, comment string }{
+	{"up", "move selection up"},
+	{"down", "move selection down"},
+	{"increase", "increase value (timer +1m, adjust numeric fields)"},
+	{"decrease", "decrease value (timer -1m, adjust numeric fields)"},
+	{"edit", "edit selected task"},
+	{"confirm", "save / confirm"},
+	{"start", "start selected task timer"},
+	{"close", "quit ticky"},
+	{"format", "cycle time format"},
+	{"options", "open this config file in your editor"},
+	{"pause", "pause the running timer"},
+	{"stop", "stop the running timer and reset the task"},
+	{"new", "create a new task"},
+	{"delete", "delete selected task"},
+	{"group", "open group list"},
+	{"report", "open report view"},
+	{"completed", "view completed tasks"},
+}
+
+// displayEntries is the authoritative list of every display TOML key used for
+// migration checks (values are written from the Config struct directly).
+var displayEntries = []string{
+	"time_format",
+	"show_task_name",
+	"show_time_left",
+	"overlay_corner",
+	"break_prompt_debounce",
+	"show_completion_animation",
+	"auto_start_break",
+}
 
 // Keybinds holds all configurable key bindings.
 type Keybinds struct {
@@ -156,7 +193,11 @@ func Load() (*Config, error) {
 		return cfg, err
 	}
 
-	// Validate / clamp values.
+	// Fill any keybind fields that were absent in the file with their defaults.
+	// This is the primary safety net: even if migration fails, the app runs.
+	applyKeybindDefaults(cfg)
+
+	// Validate / clamp display values.
 	if cfg.Display.TimeFormat == "" {
 		cfg.Display.TimeFormat = "minutes"
 	}
@@ -167,9 +208,9 @@ func Load() (*Config, error) {
 		cfg.Display.BreakPromptDebounce = 0
 	}
 
-	// Migration: if the file is missing new display keys (added after initial
-	// release), rewrite it so the user can see and edit them. Keybind
-	// customisations are preserved because cfg was decoded from the file first.
+	// Migration: if the file is missing any known key, rewrite it in full so
+	// the user can see and edit the new entries. User values are preserved
+	// because cfg was decoded (and defaults applied) before this point.
 	if needsMigration(path) {
 		_ = writeMigrated(path, cfg) // non-fatal
 	}
@@ -177,27 +218,99 @@ func Load() (*Config, error) {
 	return cfg, nil
 }
 
-// needsMigration returns true if the config file is missing any keys added
-// after the initial release.
+// applyKeybindDefaults fills every empty keybind field with its default value.
+// TOML leaves fields absent from the file as zero-value (""), so this ensures
+// the app always has a working binding regardless of what the file contains.
+func applyKeybindDefaults(cfg *Config) {
+	d := Default().Keybinds
+	if cfg.Keybinds.Up == "" {
+		cfg.Keybinds.Up = d.Up
+	}
+	if cfg.Keybinds.Down == "" {
+		cfg.Keybinds.Down = d.Down
+	}
+	if cfg.Keybinds.Increase == "" {
+		cfg.Keybinds.Increase = d.Increase
+	}
+	if cfg.Keybinds.Decrease == "" {
+		cfg.Keybinds.Decrease = d.Decrease
+	}
+	if cfg.Keybinds.Edit == "" {
+		cfg.Keybinds.Edit = d.Edit
+	}
+	if cfg.Keybinds.Confirm == "" {
+		cfg.Keybinds.Confirm = d.Confirm
+	}
+	if cfg.Keybinds.Start == "" {
+		cfg.Keybinds.Start = d.Start
+	}
+	if cfg.Keybinds.Close == "" {
+		cfg.Keybinds.Close = d.Close
+	}
+	if cfg.Keybinds.Format == "" {
+		cfg.Keybinds.Format = d.Format
+	}
+	if cfg.Keybinds.Options == "" {
+		cfg.Keybinds.Options = d.Options
+	}
+	if cfg.Keybinds.Pause == "" {
+		cfg.Keybinds.Pause = d.Pause
+	}
+	if cfg.Keybinds.Stop == "" {
+		cfg.Keybinds.Stop = d.Stop
+	}
+	if cfg.Keybinds.New == "" {
+		cfg.Keybinds.New = d.New
+	}
+	if cfg.Keybinds.Delete == "" {
+		cfg.Keybinds.Delete = d.Delete
+	}
+	if cfg.Keybinds.Group == "" {
+		cfg.Keybinds.Group = d.Group
+	}
+	if cfg.Keybinds.Report == "" {
+		cfg.Keybinds.Report = d.Report
+	}
+	if cfg.Keybinds.Completed == "" {
+		cfg.Keybinds.Completed = d.Completed
+	}
+}
+
+// needsMigration returns true if the config file is missing any known keybind
+// or display key. Derived from keybindEntries and displayEntries so it stays
+// in sync automatically when new keys are added to those lists.
 func needsMigration(path string) bool {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return false
 	}
 	content := string(data)
-	return !containsStr(content, "show_task_name") ||
-		!containsStr(content, "completed") ||
-		!containsStr(content, "stop") ||
-		!containsStr(content, "break_prompt_debounce") ||
-		!containsStr(content, "show_completion_animation") ||
-		!containsStr(content, "auto_start_break") ||
-		!containsStr(content, "increase") ||
-		!containsStr(content, "decrease")
+	for _, e := range keybindEntries {
+		if !fileContainsKey(content, e.key) {
+			return true
+		}
+	}
+	for _, key := range displayEntries {
+		if !fileContainsKey(content, key) {
+			return true
+		}
+	}
+	return false
 }
 
-func containsStr(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
+// fileContainsKey returns true when the TOML file content contains a line
+// where the given key appears as an actual assignment (key = ...), not just
+// as part of a comment or a value string. This prevents false positives from
+// keys whose names appear inside other values or comments.
+func fileContainsKey(content, key string) bool {
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimLeft(line, " \t")
+		// Skip comment lines.
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		// Match "key = " or "key=" at the start of the trimmed line.
+		if strings.HasPrefix(trimmed, key+"=") || strings.HasPrefix(trimmed, key+" ") {
 			return true
 		}
 	}
@@ -216,32 +329,17 @@ func writeMigrated(path string, cfg *Config) error {
 	return err
 }
 
-// migratedTOML produces a commented TOML string with the user's values baked in.
+// migratedTOML produces a fully-commented TOML string with the user's values
+// baked in. The keybind section is derived from keybindEntries so it stays in
+// sync with the authoritative list automatically.
 func migratedTOML(cfg *Config) string {
-	k := cfg.Keybinds
 	d := cfg.Display
-	return "# ticky configuration file\n" +
+	out := "# ticky configuration file\n" +
 		"# Edit keybinds and display preferences below.\n" +
 		"# Restart ticky for changes to take effect.\n\n" +
-		"[keybinds]\n" +
-		"up        = " + quote(k.Up) + "      # move selection up\n" +
-		"down      = " + quote(k.Down) + "    # move selection down\n" +
-		"increase  = " + quote(k.Increase) + "     # increase value (timer +1m, adjust numeric fields)\n" +
-		"decrease  = " + quote(k.Decrease) + "      # decrease value (timer -1m, adjust numeric fields)\n" +
-		"edit      = " + quote(k.Edit) + "       # edit selected task\n" +
-		"confirm   = " + quote(k.Confirm) + "   # save / confirm\n" +
-		"start     = " + quote(k.Start) + "   # start selected task timer\n" +
-		"close     = " + quote(k.Close) + "        # quit ticky\n" +
-		"format    = " + quote(k.Format) + "        # cycle time format\n" +
-		"options   = " + quote(k.Options) + "        # open this config file in your editor\n" +
-		"pause     = " + quote(k.Pause) + "        # pause the running timer\n" +
-		"stop      = " + quote(k.Stop) + "        # stop the running timer and reset the task\n" +
-		"new       = " + quote(k.New) + "        # create a new task\n" +
-		"delete    = " + quote(k.Delete) + "        # delete selected task\n" +
-		"group     = " + quote(k.Group) + "        # open group list\n" +
-		"report    = " + quote(k.Report) + "        # open report view\n" +
-		"completed = " + quote(k.Completed) + "        # view completed tasks\n\n" +
-		"[display]\n" +
+		"[keybinds]\n"
+	out += keybindsTOML(&cfg.Keybinds)
+	out += "\n[display]\n" +
 		"# How task durations are displayed.\n" +
 		"# Options: minutes | seconds | hhmm | tshirt | points\n" +
 		"time_format = " + quote(d.TimeFormat) + "\n\n" +
@@ -262,6 +360,54 @@ func migratedTOML(cfg *Config) string {
 		"# Automatically start the break timer when a focus session ends.\n" +
 		"# The break prompt is shown during the debounce window; pressing any key cancels.\n" +
 		"auto_start_break = " + boolStr(d.AutoStartBreak) + "\n"
+	return out
+}
+
+// keybindsTOML renders the [keybinds] section body from keybindEntries and the
+// provided Keybinds values. Column-aligns the values for readability.
+func keybindsTOML(k *Keybinds) string {
+	// Build a map from TOML key name to current value.
+	vals := keybindValues(k)
+
+	// Find the longest key name for alignment.
+	maxLen := 0
+	for _, e := range keybindEntries {
+		if len(e.key) > maxLen {
+			maxLen = len(e.key)
+		}
+	}
+
+	var out string
+	for _, e := range keybindEntries {
+		val := vals[e.key]
+		pad := strings.Repeat(" ", maxLen-len(e.key))
+		out += e.key + pad + " = " + quote(val) + "  # " + e.comment + "\n"
+	}
+	return out
+}
+
+// keybindValues returns a map of TOML key name → current value for all keybinds.
+// This is the one place that maps struct fields to their TOML names for writing.
+func keybindValues(k *Keybinds) map[string]string {
+	return map[string]string{
+		"up":        k.Up,
+		"down":      k.Down,
+		"increase":  k.Increase,
+		"decrease":  k.Decrease,
+		"edit":      k.Edit,
+		"confirm":   k.Confirm,
+		"start":     k.Start,
+		"close":     k.Close,
+		"format":    k.Format,
+		"options":   k.Options,
+		"pause":     k.Pause,
+		"stop":      k.Stop,
+		"new":       k.New,
+		"delete":    k.Delete,
+		"group":     k.Group,
+		"report":    k.Report,
+		"completed": k.Completed,
+	}
 }
 
 func quote(s string) string { return `"` + s + `"` }
@@ -323,56 +469,9 @@ func ResolveEditor() string {
 	}
 }
 
+// defaultTOML generates the default config file content from Default() and
+// keybindEntries, so new keybinds appear automatically in fresh installs.
 func defaultTOML() string {
-	return `# ticky configuration file
-# Edit keybinds and display preferences below.
-# Restart ticky for changes to take effect.
-
-[keybinds]
-up        = "up"      # move selection up
-down      = "down"    # move selection down
-increase  = "right"   # increase value (timer +1m, adjust numeric fields)
-decrease  = "left"    # decrease value (timer -1m, adjust numeric fields)
-edit      = "e"       # edit selected task
-confirm   = "enter"   # save / confirm
-start     = "enter"   # start selected task timer
-close     = "q"       # quit ticky
-format    = "f"       # cycle time format
-options   = "o"       # open this config file in your editor
-pause     = "p"       # pause the running timer
-stop      = "x"       # stop the running timer and reset the task
-new       = "n"       # create a new task
-delete    = "d"       # delete selected task
-group     = "g"       # open group list
-report    = "r"       # open report view
-completed = "h"       # view completed tasks
-
-[display]
-# How task durations are displayed.
-# Options: minutes | seconds | hhmm | tshirt | points
-time_format = "minutes"
-
-# Show the active task name in a terminal corner when a timer is running.
-# Use 'ticky --status' in your shell prompt to display this outside ticky.
-show_task_name = false
-
-# Show the remaining timer time in a terminal corner when a timer is running.
-show_time_left = false
-
-# Which corner to render the status overlay in (inside the ticky TUI).
-# Options: top-left | top-right | bottom-left | bottom-right
-overlay_corner = "top-right"
-
-# Seconds to wait after the break prompt appears before accepting keystrokes.
-# Prevents accidentally triggering an action if the timer fires mid-typing.
-# Set to 0 to disable.
-break_prompt_debounce = 2
-
-# Play a brief ASCII confetti animation when a task is marked complete.
-show_completion_animation = true
-
-# Automatically start the break timer when a focus session ends.
-# The break prompt is shown during the debounce window; pressing any key cancels.
-auto_start_break = false
-`
+	cfg := Default()
+	return migratedTOML(cfg)
 }

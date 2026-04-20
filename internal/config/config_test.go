@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -49,13 +50,49 @@ func TestWriteDefaultContainsKeybinds(t *testing.T) {
 	}
 
 	content := string(data)
+	// Check section headers are present.
 	for _, key := range []string{"[keybinds]", "[display]", "time_format"} {
-		if !contains(content, key) {
+		if !strings.Contains(content, key) {
 			t.Errorf("expected %q in default config output", key)
+		}
+	}
+	// Check every keybind entry is present.
+	for _, e := range keybindEntries {
+		if !fileContainsKey(content, e.key) {
+			t.Errorf("expected keybind %q in default config output", e.key)
 		}
 	}
 }
 
-func contains(s, sub string) bool {
-	return containsStr(s, sub)
+func TestApplyKeybindDefaults(t *testing.T) {
+	// A config with some fields zeroed out should get defaults filled in.
+	cfg := &Config{}
+	applyKeybindDefaults(cfg)
+	d := Default().Keybinds
+	if cfg.Keybinds.Up != d.Up {
+		t.Errorf("Up: got %q, want %q", cfg.Keybinds.Up, d.Up)
+	}
+	if cfg.Keybinds.Increase != d.Increase {
+		t.Errorf("Increase: got %q, want %q", cfg.Keybinds.Increase, d.Increase)
+	}
+	if cfg.Keybinds.Completed != d.Completed {
+		t.Errorf("Completed: got %q, want %q", cfg.Keybinds.Completed, d.Completed)
+	}
+}
+
+func TestFileContainsKey(t *testing.T) {
+	content := `[keybinds]
+up    = "up"
+stop  = "x"
+# this comment mentions stop but shouldn't count
+`
+	if !fileContainsKey(content, "up") {
+		t.Error("expected to find 'up' key")
+	}
+	if !fileContainsKey(content, "stop") {
+		t.Error("expected to find 'stop' key")
+	}
+	if fileContainsKey(content, "down") {
+		t.Error("should not find 'down' key")
+	}
 }
