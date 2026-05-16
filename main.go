@@ -63,13 +63,14 @@ func runTUI(ttyPath string) {
 		if err == nil {
 			p = tea.NewProgram(model,
 				tea.WithAltScreen(),
+				tea.WithMouseCellMotion(),
 				tea.WithInput(ttyFile),
 				tea.WithOutput(ttyFile),
 			)
 		}
 	}
 	if p == nil {
-		p = tea.NewProgram(model, tea.WithAltScreen())
+		p = tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	}
 
 	if _, err := p.Run(); err != nil {

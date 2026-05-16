@@ -305,6 +305,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		return m, nil
 
+	case tea.MouseMsg:
+		return m.updateMouse(msg)
+
 	case tickMsg:
 		return m.handleTick()
 
@@ -358,6 +361,162 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m Model) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if m.mode == ModeEditTask || m.mode == ModePausePrompt || m.mode == ModeCompletion || m.mode == ModeError {
+		return m, nil
+	}
+
+	switch msg.Button {
+	case tea.MouseButtonWheelUp:
+		return m.mouseMove(-1)
+	case tea.MouseButtonWheelDown:
+		return m.mouseMove(1)
+	case tea.MouseButtonLeft:
+		if msg.Action != tea.MouseActionPress {
+			return m, nil
+		}
+		return m.mouseClick(msg.Y)
+	}
+	return m, nil
+}
+
+func (m Model) mouseMove(delta int) (tea.Model, tea.Cmd) {
+	switch m.mode {
+	case ModeTaskList:
+		tasks := storage.ActiveTasks(m.store)
+		if len(tasks) == 0 {
+			m.cursor = 0
+			return m, nil
+		}
+		m.cursor += delta
+		if m.cursor < 0 {
+			m.cursor = 0
+		}
+		if m.cursor >= len(tasks) {
+			m.cursor = len(tasks) - 1
+		}
+		m.clampTaskScroll()
+	case ModeGroupList:
+		if len(m.store.Groups) == 0 {
+			m.groupCursor = 0
+			return m, nil
+		}
+		m.groupCursor += delta
+		if m.groupCursor < 0 {
+			m.groupCursor = 0
+		}
+		if m.groupCursor >= len(m.store.Groups) {
+			m.groupCursor = len(m.store.Groups) - 1
+		}
+	case ModeTaskActions:
+		m.actionsCursor += delta
+		if m.actionsCursor < 0 {
+			m.actionsCursor = 0
+		}
+		if maxIdx := m.taskActionsOptionCount() - 1; m.actionsCursor > maxIdx {
+			m.actionsCursor = maxIdx
+		}
+	case ModeBreakPrompt:
+		m.breakPromptCursor += delta
+		if m.breakPromptCursor < 0 {
+			m.breakPromptCursor = 0
+		}
+		if maxIdx := m.breakPromptOptionCount() - 1; m.breakPromptCursor > maxIdx {
+			m.breakPromptCursor = maxIdx
+		}
+	case ModeReport:
+		m.reportScroll += delta
+		if m.reportScroll < 0 {
+			m.reportScroll = 0
+		}
+	case ModeCompleted:
+		completed := storage.CompletedTasks(m.store)
+		if len(completed) == 0 {
+			m.completedCursor = 0
+			return m, nil
+		}
+		m.completedCursor += delta
+		if m.completedCursor < 0 {
+			m.completedCursor = 0
+		}
+		if m.completedCursor >= len(completed) {
+			m.completedCursor = len(completed) - 1
+		}
+		m.clampCompletedScroll()
+	}
+	return m, nil
+}
+
+func (m Model) mouseClick(y int) (tea.Model, tea.Cmd) {
+	switch m.mode {
+	case ModeTaskList:
+		idx := m.taskIndexAtRow(y)
+		if idx < 0 {
+			return m, nil
+		}
+		if idx == m.cursor {
+			return m.updateTaskList(m.keys.start)
+		}
+		m.cursor = idx
+		m.clampTaskScroll()
+	case ModeGroupList:
+		idx := y - 2
+		if idx < 0 || idx >= len(m.store.Groups) {
+			return m, nil
+		}
+		m.groupCursor = idx
+	case ModeTaskActions:
+		idx := y - 6
+		if idx < 0 || idx >= m.taskActionsOptionCount() {
+			return m, nil
+		}
+		if idx == m.actionsCursor {
+			return m.executeTaskAction(idx)
+		}
+		m.actionsCursor = idx
+	case ModeCompleted:
+		idx := m.completedOffset + y - 2
+		if m.completedOffset > 0 {
+			idx--
+		}
+		completed := storage.CompletedTasks(m.store)
+		if idx < 0 || idx >= len(completed) {
+			return m, nil
+		}
+		m.completedCursor = idx
+		m.clampCompletedScroll()
+	}
+	return m, nil
+}
+
+func (m Model) taskIndexAtRow(y int) int {
+	tasks := storage.ActiveTasks(m.store)
+	row := 2
+	if m.offset > 0 {
+		row++
+	}
+	end := m.offset + m.visibleTaskRows()
+	if end > len(tasks) {
+		end = len(tasks)
+	}
+	lastGroup := "__unset__"
+	for i := m.offset; i < end; i++ {
+		gName := m.GroupName(tasks[i].GroupID)
+		if gName != lastGroup {
+			lastGroup = gName
+			if y == row {
+				return -1
+			}
+			row++
+		}
+		if y == row {
+			return i
+		}
+		row++
+	}
+	return -1
 }
 
 // ─── handleTick ───────────────────────────────────────────────────────────────
