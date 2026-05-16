@@ -31,6 +31,7 @@ var keybindEntries = []struct{ key, comment string }{
 	{"group", "open group list"},
 	{"report", "open report view"},
 	{"completed", "view completed tasks"},
+	{"show_updates", "show update history and installers"},
 }
 
 // displayEntries is the authoritative list of every display TOML key used for
@@ -45,25 +46,42 @@ var displayEntries = []string{
 	"auto_start_break",
 }
 
+// updateEntries is the authoritative list of every [updates] TOML key.
+var updateEntries = []string{
+	"disable_checks",
+	"current_commit",
+	"repo_path",
+	"terminal",
+}
+
 // Keybinds holds all configurable key bindings.
 type Keybinds struct {
-	Up        string `toml:"up"`
-	Down      string `toml:"down"`
-	Edit      string `toml:"edit"`
-	Confirm   string `toml:"confirm"`
-	Start     string `toml:"start"`
-	Close     string `toml:"close"`
-	Format    string `toml:"format"`
-	Options   string `toml:"options"`
-	Pause     string `toml:"pause"`
-	Stop      string `toml:"stop"`
-	New       string `toml:"new"`
-	Delete    string `toml:"delete"`
-	Group     string `toml:"group"`
-	Report    string `toml:"report"`
-	Completed string `toml:"completed"`
-	Increase  string `toml:"increase"`
-	Decrease  string `toml:"decrease"`
+	Up          string `toml:"up"`
+	Down        string `toml:"down"`
+	Edit        string `toml:"edit"`
+	Confirm     string `toml:"confirm"`
+	Start       string `toml:"start"`
+	Close       string `toml:"close"`
+	Format      string `toml:"format"`
+	Options     string `toml:"options"`
+	Pause       string `toml:"pause"`
+	Stop        string `toml:"stop"`
+	New         string `toml:"new"`
+	Delete      string `toml:"delete"`
+	Group       string `toml:"group"`
+	Report      string `toml:"report"`
+	Completed   string `toml:"completed"`
+	ShowUpdates string `toml:"show_updates"`
+	Increase    string `toml:"increase"`
+	Decrease    string `toml:"decrease"`
+}
+
+// Updates holds update-check and installer preferences.
+type Updates struct {
+	DisableChecks bool   `toml:"disable_checks"`
+	CurrentCommit string `toml:"current_commit"`
+	RepoPath      string `toml:"repo_path"`
+	Terminal      string `toml:"terminal"`
 }
 
 // Display holds display preferences.
@@ -104,29 +122,31 @@ type Display struct {
 type Config struct {
 	Keybinds Keybinds `toml:"keybinds"`
 	Display  Display  `toml:"display"`
+	Updates  Updates  `toml:"updates"`
 }
 
 // Default returns a Config populated with sensible defaults.
 func Default() *Config {
 	return &Config{
 		Keybinds: Keybinds{
-			Up:        "up",
-			Down:      "down",
-			Edit:      "e",
-			Confirm:   "enter",
-			Start:     "enter",
-			Close:     "q",
-			Format:    "f",
-			Options:   "o",
-			Pause:     "p",
-			Stop:      "x",
-			New:       "n",
-			Delete:    "d",
-			Group:     "g",
-			Report:    "r",
-			Completed: "h",
-			Increase:  "right",
-			Decrease:  "left",
+			Up:          "up",
+			Down:        "down",
+			Edit:        "e",
+			Confirm:     "enter",
+			Start:       "enter",
+			Close:       "q",
+			Format:      "f",
+			Options:     "o",
+			Pause:       "p",
+			Stop:        "x",
+			New:         "n",
+			Delete:      "d",
+			Group:       "g",
+			Report:      "r",
+			Completed:   "h",
+			ShowUpdates: "U",
+			Increase:    "right",
+			Decrease:    "left",
 		},
 		Display: Display{
 			TimeFormat:              "minutes",
@@ -136,6 +156,12 @@ func Default() *Config {
 			BreakPromptDebounce:     2,
 			ShowCompletionAnimation: true,
 			AutoStartBreak:          false,
+		},
+		Updates: Updates{
+			DisableChecks: false,
+			CurrentCommit: "",
+			RepoPath:      "",
+			Terminal:      "",
 		},
 	}
 }
@@ -274,6 +300,9 @@ func applyKeybindDefaults(cfg *Config) {
 	if cfg.Keybinds.Completed == "" {
 		cfg.Keybinds.Completed = d.Completed
 	}
+	if cfg.Keybinds.ShowUpdates == "" {
+		cfg.Keybinds.ShowUpdates = d.ShowUpdates
+	}
 }
 
 // needsMigration returns true if the config file is missing any known keybind
@@ -291,6 +320,11 @@ func needsMigration(path string) bool {
 		}
 	}
 	for _, key := range displayEntries {
+		if !fileContainsKey(content, key) {
+			return true
+		}
+	}
+	for _, key := range updateEntries {
 		if !fileContainsKey(content, key) {
 			return true
 		}
@@ -334,6 +368,7 @@ func writeMigrated(path string, cfg *Config) error {
 // sync with the authoritative list automatically.
 func migratedTOML(cfg *Config) string {
 	d := cfg.Display
+	u := cfg.Updates
 	out := "# ticky configuration file\n" +
 		"# Edit keybinds and display preferences below.\n" +
 		"# Restart ticky for changes to take effect.\n\n" +
@@ -359,7 +394,12 @@ func migratedTOML(cfg *Config) string {
 		"show_completion_animation = " + boolStr(d.ShowCompletionAnimation) + "\n\n" +
 		"# Automatically start the break timer when a focus session ends.\n" +
 		"# The break prompt is shown during the debounce window; pressing any key cancels.\n" +
-		"auto_start_break = " + boolStr(d.AutoStartBreak) + "\n"
+		"auto_start_break = " + boolStr(d.AutoStartBreak) + "\n\n" +
+		"[updates]\n" +
+		"disable_checks = " + boolStr(u.DisableChecks) + "   # true disables startup update checks\n" +
+		"current_commit = " + quote(u.CurrentCommit) + "   # installed app commit, maintained by ticky\n" +
+		"repo_path = " + quote(u.RepoPath) + "   # source checkout used for updates\n" +
+		"terminal = " + quote(u.Terminal) + "   # optional terminal command for detached updates\n"
 	return out
 }
 
@@ -390,24 +430,48 @@ func keybindsTOML(k *Keybinds) string {
 // This is the one place that maps struct fields to their TOML names for writing.
 func keybindValues(k *Keybinds) map[string]string {
 	return map[string]string{
-		"up":        k.Up,
-		"down":      k.Down,
-		"increase":  k.Increase,
-		"decrease":  k.Decrease,
-		"edit":      k.Edit,
-		"confirm":   k.Confirm,
-		"start":     k.Start,
-		"close":     k.Close,
-		"format":    k.Format,
-		"options":   k.Options,
-		"pause":     k.Pause,
-		"stop":      k.Stop,
-		"new":       k.New,
-		"delete":    k.Delete,
-		"group":     k.Group,
-		"report":    k.Report,
-		"completed": k.Completed,
+		"up":           k.Up,
+		"down":         k.Down,
+		"increase":     k.Increase,
+		"decrease":     k.Decrease,
+		"edit":         k.Edit,
+		"confirm":      k.Confirm,
+		"start":        k.Start,
+		"close":        k.Close,
+		"format":       k.Format,
+		"options":      k.Options,
+		"pause":        k.Pause,
+		"stop":         k.Stop,
+		"new":          k.New,
+		"delete":       k.Delete,
+		"group":        k.Group,
+		"report":       k.Report,
+		"completed":    k.Completed,
+		"show_updates": k.ShowUpdates,
 	}
+}
+
+// RecordUpdateMetadata stores the installed commit and source repo path without
+// changing user-facing preferences.
+func RecordUpdateMetadata(commit, repoPath string) error {
+	cfg, err := Load()
+	if err != nil {
+		cfg = Default()
+	}
+	if commit != "" {
+		cfg.Updates.CurrentCommit = commit
+	}
+	if repoPath != "" {
+		cfg.Updates.RepoPath = repoPath
+	}
+	path, err := ConfigPath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	return writeMigrated(path, cfg)
 }
 
 func quote(s string) string { return `"` + s + `"` }

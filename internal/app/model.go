@@ -1,6 +1,7 @@
 package app
 
 import (
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -13,6 +14,8 @@ import (
 	"github.com/wingitman/ticky/internal/session"
 	"github.com/wingitman/ticky/internal/storage"
 	"github.com/wingitman/ticky/internal/timer"
+	appupdate "github.com/wingitman/ticky/internal/update"
+	"github.com/wingitman/ticky/internal/version"
 )
 
 // ─── Mode ─────────────────────────────────────────────────────────────────────
@@ -21,18 +24,20 @@ import (
 type Mode int
 
 const (
-	ModeTaskList    Mode = iota // default: scrollable task list
-	ModeGroupList               // group management view
-	ModeEditTask                // create / edit task (navigable form)
-	ModeTaskActions             // action sub-menu for active task
-	ModeTimerFocus              // running focus countdown
-	ModeTimerBreak              // running break countdown
-	ModePausePrompt             // "why are you pausing?" overlay
-	ModeBreakPrompt             // focus-done / break-done choice overlay
-	ModeCompletion              // celebratory animation on task complete
-	ModeReport                  // report table
-	ModeCompleted               // completed tasks list
-	ModeError                   // unrecoverable error overlay
+	ModeTaskList     Mode = iota // default: scrollable task list
+	ModeGroupList                // group management view
+	ModeEditTask                 // create / edit task (navigable form)
+	ModeTaskActions              // action sub-menu for active task
+	ModeTimerFocus               // running focus countdown
+	ModeTimerBreak               // running break countdown
+	ModePausePrompt              // "why are you pausing?" overlay
+	ModeBreakPrompt              // focus-done / break-done choice overlay
+	ModeCompletion               // celebratory animation on task complete
+	ModeReport                   // report table
+	ModeCompleted                // completed tasks list
+	ModeUpdatePrompt             // startup update prompt
+	ModeUpdates                  // update history/install screen
+	ModeError                    // unrecoverable error overlay
 )
 
 // editField indexes which field is focused in the task edit form.
@@ -72,6 +77,7 @@ type resolvedKeys struct {
 	group     string
 	report    string
 	completed string
+	updates   string
 	increase  string
 	decrease  string
 }
@@ -93,6 +99,7 @@ func resolveKeys(k config.Keybinds) resolvedKeys {
 		group:     k.Group,
 		report:    k.Report,
 		completed: k.Completed,
+		updates:   k.ShowUpdates,
 		increase:  k.Increase,
 		decrease:  k.Decrease,
 	}
@@ -173,6 +180,13 @@ type Model struct {
 	// Error / status messages
 	errorMsg  string
 	statusMsg string
+
+	// Update state
+	startupUpdateChecks bool
+	updateInfo          appupdate.Info
+	updateChecking      bool
+	updateCursor        int
+	updateExpanded      map[string]bool
 }
 
 // timeFormats is the ordered cycle toggled by 'f'.
@@ -181,7 +195,7 @@ var timeFormats = []string{"minutes", "seconds", "hhmm", "tshirt", "points"}
 // ─── New ──────────────────────────────────────────────────────────────────────
 
 // New constructs a ready-to-use Model.
-func New(cfg *config.Config, store *storage.Store, sess *session.Session) Model {
+func New(cfg *config.Config, store *storage.Store, sess *session.Session, startupUpdateChecks bool) Model {
 	fmtIdx := 0
 	for i, f := range timeFormats {
 		if f == cfg.Display.TimeFormat {
@@ -206,15 +220,17 @@ func New(cfg *config.Config, store *storage.Store, sess *session.Session) Model 
 	pauseInput.CharLimit = 200
 
 	m := Model{
-		cfg:           cfg,
-		store:         store,
-		sess:          sess,
-		keys:          resolveKeys(cfg.Keybinds),
-		mode:          ModeTaskList,
-		activeTaskIdx: -1,
-		editInputs:    inputs,
-		pauseInput:    pauseInput,
-		timeFormatIdx: fmtIdx,
+		cfg:                 cfg,
+		store:               store,
+		sess:                sess,
+		keys:                resolveKeys(cfg.Keybinds),
+		mode:                ModeTaskList,
+		activeTaskIdx:       -1,
+		editInputs:          inputs,
+		pauseInput:          pauseInput,
+		timeFormatIdx:       fmtIdx,
+		startupUpdateChecks: startupUpdateChecks,
+		updateExpanded:      map[string]bool{},
 	}
 
 	if session.IsActive(sess) {
@@ -282,6 +298,19 @@ func (m Model) resumeFromSession(sess *session.Session) Model {
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
 func (m Model) Init() tea.Cmd {
+	if m.startupUpdateChecks && m.cfg != nil && !m.cfg.Updates.DisableChecks {
+		updateCmd := checkUpdatesCmd(m.cfg)
+		if m.mode == ModeTimerFocus || m.mode == ModeTimerBreak {
+			if m.tmr.State == timer.StateRunning {
+				return tea.Batch(tickCmd(), pollSessionCmd(), updateCmd)
+			}
+			return tea.Batch(pollSessionCmd(), updateCmd)
+		}
+		if m.mode == ModeBreakPrompt {
+			return tea.Batch(m.breakPromptInitCmd(), updateCmd)
+		}
+		return updateCmd
+	}
 	if m.mode == ModeTimerFocus || m.mode == ModeTimerBreak {
 		if m.tmr.State == timer.StateRunning {
 			return tea.Batch(tickCmd(), pollSessionCmd())
@@ -320,6 +349,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case autoStartBreakMsg:
 		return m.handleAutoStartBreak()
 
+	case updateCheckMsg:
+		m.updateChecking = false
+		m.updateInfo = msg.info
+		if msg.info.CheckError != "" {
+			return m, nil
+		}
+		if len(msg.info.Available) > 0 && m.mode == ModeTaskList {
+			m.updateCursor = 0
+			m.mode = ModeUpdatePrompt
+		}
+		return m, nil
+
+	case updateLaunchMsg:
+		if msg.err != "" {
+			m.mode = ModeError
+			m.errorMsg = msg.err
+			return m, nil
+		}
+		return m, tea.Quit
+
 	case saveErrMsg:
 		m.mode = ModeError
 		m.errorMsg = "Failed to save: " + string(msg)
@@ -353,6 +402,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateReport(key)
 		case ModeCompleted:
 			return m.updateCompleted(key)
+		case ModeUpdatePrompt:
+			return m.updateUpdatePrompt(key)
+		case ModeUpdates:
+			return m.updateUpdates(key)
 		case ModeError:
 			m.mode = ModeTaskList
 			m.errorMsg = ""
@@ -364,7 +417,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if m.mode == ModeEditTask || m.mode == ModePausePrompt || m.mode == ModeCompletion || m.mode == ModeError {
+	if m.mode == ModeEditTask || m.mode == ModePausePrompt || m.mode == ModeCompletion || m.mode == ModeError || m.mode == ModeUpdatePrompt {
 		return m, nil
 	}
 
@@ -445,6 +498,9 @@ func (m Model) mouseMove(delta int) (tea.Model, tea.Cmd) {
 			m.completedCursor = len(completed) - 1
 		}
 		m.clampCompletedScroll()
+	case ModeUpdates:
+		m.updateCursor += delta
+		m.clampUpdateCursor()
 	}
 	return m, nil
 }
@@ -487,6 +543,20 @@ func (m Model) mouseClick(y int) (tea.Model, tea.Cmd) {
 		}
 		m.completedCursor = idx
 		m.clampCompletedScroll()
+	case ModeUpdates:
+		idx := y - 7
+		if len(m.updateInfo.Available) > 0 {
+			idx--
+		}
+		if idx < 0 || idx >= len(m.updateCommits()) {
+			return m, nil
+		}
+		if idx == m.updateCursor {
+			m.toggleSelectedUpdateDetails()
+			return m, nil
+		}
+		m.updateCursor = idx
+		m.clampUpdateCursor()
 	}
 	return m, nil
 }
@@ -778,6 +848,14 @@ func (m Model) updateTaskList(key string) (tea.Model, tea.Cmd) {
 		m.mode = ModeCompleted
 		m.completedCursor = 0
 		m.completedOffset = 0
+
+	case matchKey(key, m.keys.updates):
+		m.mode = ModeUpdates
+		m.updateCursor = 0
+		if m.updateInfo.RepoPath == "" && !m.updateChecking {
+			m.updateChecking = true
+			return m, checkUpdatesCmd(m.cfg)
+		}
 
 	case matchKey(key, m.keys.format):
 		m.timeFormatIdx = (m.timeFormatIdx + 1) % len(timeFormats)
@@ -1578,6 +1656,8 @@ type completionTickMsg struct{}
 type autoStartBreakMsg struct{}
 type saveErrMsg string
 type clearStatusMsg struct{}
+type updateCheckMsg struct{ info appupdate.Info }
+type updateLaunchMsg struct{ err string }
 
 // completionTotalFrames is how many animation frames to show (~2s at 10fps).
 const completionTotalFrames = 20
@@ -1622,6 +1702,40 @@ func clearStatusCmd() tea.Cmd {
 	return tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
 		return clearStatusMsg{}
 	})
+}
+
+func checkUpdatesCmd(cfg *config.Config) tea.Cmd {
+	return func() tea.Msg {
+		return updateCheckMsg{info: appupdate.Check(cfg, version.Commit, 20)}
+	}
+}
+
+func (m Model) launchUpdate(latest bool, targetCommit string) tea.Cmd {
+	if latest && targetCommit == "" {
+		targetCommit = m.updateInfo.LatestCommit
+	}
+	repoPath := m.updateInfo.RepoPath
+	if repoPath == "" && m.cfg != nil {
+		repoPath = m.cfg.Updates.RepoPath
+	}
+	recorder, _ := os.Executable()
+	terminal := ""
+	if m.cfg != nil {
+		terminal = m.cfg.Updates.Terminal
+	}
+	req := appupdate.InstallRequest{
+		RepoPath:       repoPath,
+		TargetCommit:   targetCommit,
+		Latest:         latest,
+		Terminal:       terminal,
+		RecorderBinary: recorder,
+	}
+	return func() tea.Msg {
+		if err := appupdate.LaunchDetached(req); err != nil {
+			return updateLaunchMsg{err: err.Error()}
+		}
+		return updateLaunchMsg{}
+	}
 }
 
 func openConfigCmd() tea.Cmd {

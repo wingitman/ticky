@@ -37,6 +37,10 @@ func (m Model) View() string {
 		return m.renderReport()
 	case ModeCompleted:
 		return m.renderCompleted()
+	case ModeUpdatePrompt:
+		return m.renderUpdatePrompt()
+	case ModeUpdates:
+		return m.renderUpdatesScreen()
 	case ModeError:
 		return m.renderError()
 	default:
@@ -245,6 +249,7 @@ func (m Model) renderTaskList() string {
 		m.keys.group + " groups",
 		m.keys.report + " report",
 		m.keys.completed + " completed",
+		m.keys.updates + " updates",
 		m.keys.format + " fmt:" + timeFormats[m.timeFormatIdx],
 		m.keys.options + " config",
 		m.keys.close + " quit",

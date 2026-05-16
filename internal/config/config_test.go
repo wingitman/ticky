@@ -18,6 +18,9 @@ func TestDefault(t *testing.T) {
 	if cfg.Display.TimeFormat != "minutes" {
 		t.Errorf("expected time_format 'minutes', got %q", cfg.Display.TimeFormat)
 	}
+	if cfg.Keybinds.ShowUpdates != "U" {
+		t.Errorf("expected show_updates keybind 'U', got %q", cfg.Keybinds.ShowUpdates)
+	}
 }
 
 func TestLoadCreatesDefaultFile(t *testing.T) {
@@ -51,7 +54,7 @@ func TestWriteDefaultContainsKeybinds(t *testing.T) {
 
 	content := string(data)
 	// Check section headers are present.
-	for _, key := range []string{"[keybinds]", "[display]", "time_format"} {
+	for _, key := range []string{"[keybinds]", "[display]", "[updates]", "time_format"} {
 		if !strings.Contains(content, key) {
 			t.Errorf("expected %q in default config output", key)
 		}
@@ -60,6 +63,11 @@ func TestWriteDefaultContainsKeybinds(t *testing.T) {
 	for _, e := range keybindEntries {
 		if !fileContainsKey(content, e.key) {
 			t.Errorf("expected keybind %q in default config output", e.key)
+		}
+	}
+	for _, key := range updateEntries {
+		if !fileContainsKey(content, key) {
+			t.Errorf("expected update key %q in default config output", key)
 		}
 	}
 }
@@ -77,6 +85,9 @@ func TestApplyKeybindDefaults(t *testing.T) {
 	}
 	if cfg.Keybinds.Completed != d.Completed {
 		t.Errorf("Completed: got %q, want %q", cfg.Keybinds.Completed, d.Completed)
+	}
+	if cfg.Keybinds.ShowUpdates != d.ShowUpdates {
+		t.Errorf("ShowUpdates: got %q, want %q", cfg.Keybinds.ShowUpdates, d.ShowUpdates)
 	}
 }
 

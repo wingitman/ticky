@@ -300,6 +300,7 @@ All keybinds are configurable in `ticky.toml`. These are the defaults.
 | `h` | Completed tasks |
 | `f` | Cycle time format |
 | `o` | Open `ticky.toml` in `$EDITOR` |
+| `U` | Show updates, recent changes, and install history commits |
 | `q` / `esc` | Quit (active timer keeps running in background) |
 
 ### Timer screen
@@ -376,6 +377,7 @@ delete    = "d"       # delete selected task
 group     = "g"       # open group list
 report    = "r"       # open report view
 completed = "h"       # view completed tasks
+show_updates = "U"    # show update history and installers
 
 [display]
 # How task durations are displayed.
@@ -392,7 +394,19 @@ show_time_left = false
 # Which corner to render the status overlay in (inside the ticky TUI).
 # Options: top-left | top-right | bottom-left | bottom-right
 overlay_corner = "top-right"
+
+[updates]
+disable_checks = false  # true disables startup update checks
+current_commit = ""     # installed app commit, maintained by ticky
+repo_path = ""          # source checkout used for updates
+terminal = ""           # optional terminal command for detached updates
 ```
+
+### Updates
+
+Normal TUI launches check the configured source checkout with `git fetch --prune --all`. `--watch`, `--status`, and `--check` never run update prompts.
+
+Updates run in a separate terminal and ticky exits before the installer starts. The updater uses your checkout's current branch/upstream, so forks and feature branches are preserved. Press `U` to review recent commits, expand commit descriptions, install latest, or install an older history commit.
 
 ### Vim-style keybinds
 

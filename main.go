@@ -12,10 +12,18 @@ import (
 	"github.com/wingitman/ticky/internal/overlay"
 	"github.com/wingitman/ticky/internal/session"
 	"github.com/wingitman/ticky/internal/storage"
+	"github.com/wingitman/ticky/internal/version"
 )
 
 func main() {
 	args := os.Args[1:]
+	if hasFlag(args, "--record-update") {
+		if err := config.RecordUpdateMetadata(flagValue(args, "--update-commit"), flagValue(args, "--update-repo")); err != nil {
+			fmt.Fprintf(os.Stderr, "ticky: could not record update metadata: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	switch {
 	case hasFlag(args, "--watch"):
@@ -41,6 +49,10 @@ func runTUI(ttyPath string) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ticky: config warning: %v\n", err)
 	}
+	if version.Commit != "" && version.Commit != "dev" && cfg.Updates.CurrentCommit != version.Commit {
+		cfg.Updates.CurrentCommit = version.Commit
+		_ = config.RecordUpdateMetadata(version.Commit, cfg.Updates.RepoPath)
+	}
 
 	store, err := storage.Load()
 	if err != nil {
@@ -52,7 +64,7 @@ func runTUI(ttyPath string) {
 		fmt.Fprintf(os.Stderr, "ticky: session warning: %v\n", err)
 	}
 
-	model := app.New(cfg, store, sess)
+	model := app.New(cfg, store, sess, ttyPath == "")
 
 	// When relaunched by --watch via reexecOnTTY, a --tty path is passed so
 	// BubbleTea uses the already-open FD instead of independently opening
