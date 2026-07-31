@@ -3,7 +3,7 @@ package app
 import (
 	appupdate "github.com/wingitman/ticky/internal/update"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 func (m Model) updateUpdatePrompt(key string) (tea.Model, tea.Cmd) {

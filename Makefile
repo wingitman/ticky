@@ -12,27 +12,32 @@ PWSHRC := $(HOME)/.config/powershell/Microsoft.PowerShell_profile.ps1
 # tmux config — prefer XDG location, fall back to legacy ~/.tmux.conf
 TMUXCFG := $(shell [ -f $(HOME)/.config/tmux/tmux.conf ] && echo $(HOME)/.config/tmux/tmux.conf || echo $(HOME)/.tmux.conf)
 
-.PHONY: all build build-all install install-shell uninstall test test-all clean
+.PHONY: all build build-desktop build-all install install-shell uninstall test test-all clean
 
 all: build
 
 build:
 	@mkdir -p $(BUILD_DIR)
 	go build -ldflags="-s -w -X github.com/wingitman/ticky/internal/version.Commit=$(COMMIT)" -o $(BUILD_DIR)/$(BINARY) .
+	@$(MAKE) --no-print-directory build-desktop
 	@echo "Built: $(BUILD_DIR)/$(BINARY)"
+
+build-desktop:
+	@mkdir -p $(BUILD_DIR)
+	go build -tags desktop -ldflags="-s -w -X github.com/wingitman/ticky/internal/version.Commit=$(COMMIT)" -o $(BUILD_DIR)/$(BINARY)-desktop ./cmd/ticky-desktop
 
 build-all:
 	@mkdir -p $(RELEASES_DIR)/linux/amd64 $(RELEASES_DIR)/linux/arm64 $(RELEASES_DIR)/darwin/amd64 $(RELEASES_DIR)/darwin/arm64 $(RELEASES_DIR)/windows
 	@echo "Building linux/amd64..."
-	GOOS=linux   GOARCH=amd64 go build -ldflags="-s -w -X github.com/wingitman/ticky/internal/version.Commit=$(COMMIT)" -o $(RELEASES_DIR)/linux/amd64/$(BINARY) .
+	GOOS=linux   GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w -X github.com/wingitman/ticky/internal/version.Commit=$(COMMIT)" -o $(RELEASES_DIR)/linux/amd64/$(BINARY) .
 	@echo "Building linux/arm64..."
-	GOOS=linux   GOARCH=arm64 go build -ldflags="-s -w -X github.com/wingitman/ticky/internal/version.Commit=$(COMMIT)" -o $(RELEASES_DIR)/linux/arm64/$(BINARY) .
+	GOOS=linux   GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-s -w -X github.com/wingitman/ticky/internal/version.Commit=$(COMMIT)" -o $(RELEASES_DIR)/linux/arm64/$(BINARY) .
 	@echo "Building darwin/amd64..."
-	GOOS=darwin  GOARCH=amd64 go build -ldflags="-s -w -X github.com/wingitman/ticky/internal/version.Commit=$(COMMIT)" -o $(RELEASES_DIR)/darwin/amd64/$(BINARY) .
+	GOOS=darwin  GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w -X github.com/wingitman/ticky/internal/version.Commit=$(COMMIT)" -o $(RELEASES_DIR)/darwin/amd64/$(BINARY) .
 	@echo "Building darwin/arm64..."
-	GOOS=darwin  GOARCH=arm64 go build -ldflags="-s -w -X github.com/wingitman/ticky/internal/version.Commit=$(COMMIT)" -o $(RELEASES_DIR)/darwin/arm64/$(BINARY) .
+	GOOS=darwin  GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-s -w -X github.com/wingitman/ticky/internal/version.Commit=$(COMMIT)" -o $(RELEASES_DIR)/darwin/arm64/$(BINARY) .
 	@echo "Building windows/amd64..."
-	GOOS=windows GOARCH=amd64 go build -ldflags="-s -w -X github.com/wingitman/ticky/internal/version.Commit=$(COMMIT)" -o $(RELEASES_DIR)/windows/$(BINARY).exe .
+	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w -X github.com/wingitman/ticky/internal/version.Commit=$(COMMIT)" -o $(RELEASES_DIR)/windows/$(BINARY).exe .
 	@echo "Pre-built binaries written to $(RELEASES_DIR)/"
 
 install:
@@ -41,7 +46,9 @@ install:
 		echo "==> Go found - building ticky from source..."; \
 		mkdir -p $(BUILD_DIR); \
 		go build -ldflags="-s -w -X github.com/wingitman/ticky/internal/version.Commit=$(COMMIT)" -o $(BUILD_DIR)/$(BINARY) . || exit 1; \
+		go build -tags desktop -ldflags="-s -w -X github.com/wingitman/ticky/internal/version.Commit=$(COMMIT)" -o $(BUILD_DIR)/$(BINARY)-desktop ./cmd/ticky-desktop || exit 1; \
 		cp $(BUILD_DIR)/$(BINARY) $(INSTALL_DIR)/$(BINARY); \
+		if [ -f "$(BUILD_DIR)/$(BINARY)-desktop" ]; then cp "$(BUILD_DIR)/$(BINARY)-desktop" "$(INSTALL_DIR)/$(BINARY)-desktop"; fi; \
 		echo "    Built and installed from source."; \
 	else \
 		echo "==> Go not found - installing pre-built binary from releases/..."; \
@@ -52,11 +59,12 @@ install:
 		if [ ! -f "$$RELEASE_BIN" ]; then echo "ERROR: Pre-built binary not found at $$RELEASE_BIN"; echo "       Please install Go (https://go.dev/dl/) and re-run, or ask a developer to run 'make build-all' and commit the releases/ folder."; exit 1; fi; \
 		cp "$$RELEASE_BIN" $(INSTALL_DIR)/$(BINARY); \
 		chmod +x $(INSTALL_DIR)/$(BINARY); \
+		if [ -f "$(RELEASES_DIR)/$$OS/$$ARCH/$(BINARY)-desktop" ]; then cp "$(RELEASES_DIR)/$$OS/$$ARCH/$(BINARY)-desktop" "$(INSTALL_DIR)/$(BINARY)-desktop"; chmod +x "$(INSTALL_DIR)/$(BINARY)-desktop"; fi; \
 		echo "    Installed pre-built binary."; \
 	fi
 	@echo "Installed: $(INSTALL_DIR)/$(BINARY)"
 	@echo ""
-	@$(MAKE) --no-print-directory install-shell
+	@if [ "$(UPDATE)" != "1" ]; then $(MAKE) --no-print-directory install-shell; fi
 
 # ── Shell prompt integration ────────────────────────────────────────────────
 #

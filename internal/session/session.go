@@ -129,6 +129,9 @@ func Remaining(s *Session) time.Duration {
 	if !IsActive(s) || s.EndTime.IsZero() {
 		return 0
 	}
+	if s.Paused && !s.PausedAt.IsZero() {
+		return s.EndTime.Sub(s.PausedAt)
+	}
 	d := time.Until(s.EndTime)
 	if d < 0 {
 		return 0

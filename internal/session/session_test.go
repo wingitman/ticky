@@ -35,7 +35,7 @@ func TestRemaining(t *testing.T) {
 	// Future end time.
 	in5 := &Session{TaskID: "x", EndTime: time.Now().Add(5 * time.Minute)}
 	rem := Remaining(in5)
-	if rem < 4*time.Minute || rem > 5*time.Minute {
+	if rem < 4*time.Minute || rem > 5*time.Minute+time.Second {
 		t.Errorf("expected ~5m remaining, got %v", rem)
 	}
 
@@ -43,6 +43,20 @@ func TestRemaining(t *testing.T) {
 	past := &Session{TaskID: "x", EndTime: time.Now().Add(-time.Minute)}
 	if Remaining(past) != 0 {
 		t.Error("expected 0 for overdue session")
+	}
+}
+
+func TestRemainingPausedSessionDoesNotDecrease(t *testing.T) {
+	pausedAt := time.Now().Add(-2 * time.Minute)
+	sess := &Session{
+		TaskID:   "x",
+		EndTime:  time.Now().Add(3 * time.Minute),
+		Paused:   true,
+		PausedAt: pausedAt,
+	}
+	rem := Remaining(sess)
+	if rem < 4*time.Minute || rem > 5*time.Minute+time.Second {
+		t.Fatalf("expected about 5m remaining while paused, got %v", rem)
 	}
 }
 

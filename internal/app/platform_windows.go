@@ -5,6 +5,7 @@ package app
 import (
 	"os"
 	"os/exec"
+	"syscall"
 
 	"github.com/wingitman/ticky/internal/session"
 )
@@ -40,6 +41,12 @@ func resolveSelf() string {
 // would be set here for full detachment, but basic Start() is sufficient
 // for our watcher use case.
 func setSysProcAttr(cmd *exec.Cmd) {}
+
+func setDetachedProcAttr(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		CreationFlags: 0x00000008 | 0x00000200, // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+	}
+}
 
 // killWatcher terminates the background --watch process. On Windows we use
 // os.Process.Kill since SIGTERM is not available.

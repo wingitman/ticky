@@ -1,10 +1,13 @@
 package app
 
 import (
+	"image/color"
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/wingitman/ticky/internal/report"
 	"github.com/wingitman/ticky/internal/storage"
 	"github.com/wingitman/ticky/internal/timer"
@@ -13,39 +16,47 @@ import (
 
 // ─── View entry point ─────────────────────────────────────────────────────────
 
-func (m Model) View() string {
+func (m Model) View() tea.View {
 	if m.width == 0 {
-		return "Loading…"
+		return tea.NewView("Loading...")
 	}
 
+	var content string
 	switch m.mode {
 	case ModeTimerFocus, ModeTimerBreak:
-		return m.renderTimerScreen()
+		content = m.renderTimerScreen()
 	case ModePausePrompt:
-		return m.renderPausePrompt()
+		content = m.renderPausePrompt()
 	case ModeBreakPrompt:
-		return m.renderBreakPrompt()
+		content = m.renderBreakPrompt()
 	case ModeEditTask:
-		return m.renderEditTask()
+		content = m.renderEditTask()
 	case ModeGroupList:
-		return m.renderGroupList()
+		content = m.renderGroupList()
 	case ModeTaskActions:
-		return m.renderTaskActions()
+		content = m.renderTaskActions()
 	case ModeCompletion:
-		return m.renderCompletion()
+		content = m.renderCompletion()
 	case ModeReport:
-		return m.renderReport()
+		content = m.renderReport()
 	case ModeCompleted:
-		return m.renderCompleted()
+		content = m.renderCompleted()
 	case ModeUpdatePrompt:
-		return m.renderUpdatePrompt()
+		content = m.renderUpdatePrompt()
 	case ModeUpdates:
-		return m.renderUpdatesScreen()
+		content = m.renderUpdatesScreen()
 	case ModeError:
-		return m.renderError()
+		content = m.renderError()
+	case ModeDeletePrompt:
+		content = m.renderDeletePrompt()
 	default:
-		return m.renderTaskList()
+		content = m.renderTaskList()
 	}
+	content = clampView(content, m.width, m.height)
+	view := tea.NewView(content)
+	view.AltScreen = true
+	view.MouseMode = tea.MouseModeCellMotion
+	return view
 }
 
 // ─── Corner overlay ───────────────────────────────────────────────────────────
@@ -177,7 +188,7 @@ func (m Model) renderTaskList() string {
 	b.WriteString(m.renderBanner("TICKY", ui.StyleHeader))
 	b.WriteString("\n")
 
-	tasks := storage.ActiveTasks(m.store)
+	tasks := m.taskListTasks()
 
 	if len(tasks) == 0 {
 		b.WriteString(ui.StyleMuted.Render("  No tasks yet. Press ") +
@@ -229,13 +240,13 @@ func (m Model) renderTaskList() string {
 	}
 
 	// Show active task status bar when a timer is running or paused.
-	if m.activeTaskIdx >= 0 && m.activeTaskIdx < len(m.store.Tasks) {
+	if m.cfg.Display.ShowHints && m.activeTaskIdx >= 0 && m.activeTaskIdx < len(m.store.Tasks) {
 		t := m.store.Tasks[m.activeTaskIdx]
 		rem := m.tmr.HHMMString()
 		if m.tmr.State == timer.StatePaused {
-			b.WriteString(ui.StyleWarning.Render("  ⏸ " + t.Name + "  " + rem + " remaining — enter to resume · e for actions · x to stop"))
+			b.WriteString(ui.StyleWarning.Render("  ⏸ " + t.Name + "  " + rem + " remaining — " + m.keys.start + " resume · " + m.keys.edit + " actions · " + m.keys.stop + " stop"))
 		} else {
-			b.WriteString(ui.StyleSuccess.Render("  ▶ " + t.Name + "  " + rem + " remaining — enter to view timer · e for actions · x to stop"))
+			b.WriteString(ui.StyleSuccess.Render("  ▶ " + t.Name + "  " + rem + " remaining — " + m.keys.start + " timer · " + m.keys.edit + " actions · " + m.keys.stop + " stop"))
 		}
 		b.WriteString("\n")
 	}
@@ -337,11 +348,28 @@ func (m Model) renderTaskActions() string {
 			ui.StyleMuted.Render(m.keys.up+"/"+m.keys.down+" select  ·  "+m.keys.confirm+" confirm  ·  "+m.keys.increase+"/"+m.keys.decrease+" ±1m  ·  "+m.keys.close+" back")
 	}
 
-	box := ui.StyleBreakBox.Width(m.width - 8).Render(content)
+	box := ui.StyleBreakBox.Width(max(1, m.width-8)).Render(content)
 	b.WriteString("\n")
 	b.WriteString(centerStr(box, m.width))
 	b.WriteString("\n")
 	return b.String()
+}
+
+func (m Model) renderDeletePrompt() string {
+	taskName := "selected task"
+	for _, task := range m.store.Tasks {
+		if task.ID == m.deleteTaskID {
+			taskName = task.Name
+			break
+		}
+	}
+	content := ui.StyleError.Render("DELETE TASK") + "\n\n" +
+		ui.StyleHeader.Render(taskName) + "\n\n" +
+		ui.StyleWarning.Render("This action cannot be undone.") + "\n\n" +
+		ui.StyleStatusKey.Render("["+m.keys.confirm+"]") + " Delete   " +
+		ui.StyleStatusKey.Render("["+m.keys.close+"]") + " Cancel"
+	box := ui.StyleErrorBox.Width(max(1, m.width-8)).Render(content)
+	return "\n" + centerStr(box, m.width) + "\n"
 }
 
 // ─── Timer Screen ─────────────────────────────────────────────────────────────
@@ -422,7 +450,7 @@ func (m Model) renderPausePrompt() string {
 		ui.StyleMuted.Render(m.keys.confirm) + " resume  " +
 		ui.StyleMuted.Render(m.keys.close) + " resume without recording"
 
-	box := ui.StyleBox.Width(m.width - 8).Render(content)
+	box := ui.StyleBox.Width(max(1, m.width-8)).Render(content)
 	b.WriteString("\n")
 	b.WriteString(centerStr(box, m.width))
 	b.WriteString("\n")
@@ -529,7 +557,7 @@ func (m Model) renderBreakPrompt() string {
 		actions + autoHint + "\n\n" +
 		ui.StyleMuted.Render(hint)
 
-	box := ui.StyleBreakBox.Width(m.width - 8).Render(content)
+	box := ui.StyleBreakBox.Width(max(1, m.width-8)).Render(content)
 	b.WriteString("\n")
 	b.WriteString(centerStr(box, m.width))
 	b.WriteString("\n")
@@ -661,15 +689,15 @@ func (m Model) renderGroupList() string {
 var confettiChars = []string{"✦", "✧", "*", "·", "+", "✨", "★", "•", "◆", "◇"}
 
 // confettiColors cycles through celebratory colors.
-var confettiColors = []lipgloss.Color{
-	"#FFD700", // gold
-	"#FF69B4", // hot pink
-	"#00CED1", // dark turquoise
-	"#7CFC00", // lawn green
-	"#FF6347", // tomato
-	"#9370DB", // medium purple
-	"#40E0D0", // turquoise
-	"#FFA500", // orange
+var confettiColors = []color.Color{
+	lipgloss.Color("#FFD700"), // gold
+	lipgloss.Color("#FF69B4"), // hot pink
+	lipgloss.Color("#00CED1"), // dark turquoise
+	lipgloss.Color("#7CFC00"), // lawn green
+	lipgloss.Color("#FF6347"), // tomato
+	lipgloss.Color("#9370DB"), // medium purple
+	lipgloss.Color("#40E0D0"), // turquoise
+	lipgloss.Color("#FFA500"), // orange
 }
 
 func (m Model) renderCompletion() string {
@@ -908,7 +936,7 @@ func (m Model) renderError() string {
 	content := ui.StyleError.Render("ERROR") + "\n\n" +
 		m.errorMsg + "\n\n" +
 		ui.StyleMuted.Render("Press any key to continue")
-	box := ui.StyleErrorBox.Width(m.width - 8).Render(content)
+	box := ui.StyleErrorBox.Width(max(1, m.width-8)).Render(content)
 
 	var b strings.Builder
 	b.WriteString("\n")
@@ -920,6 +948,13 @@ func (m Model) renderError() string {
 // ─── Shared helpers ───────────────────────────────────────────────────────────
 
 func (m Model) renderBanner(title string, style lipgloss.Style) string {
+	if m.cfg.Display.ShowLogo && title == "TICKY" && m.width >= 18 {
+		brand := ui.BrandDelby.Render("delby") + ui.BrandSoft.Render("soft")
+		line := brand + ui.StyleMuted.Render(" / ticky")
+		if lipgloss.Width(line) <= m.width {
+			return line + ui.StyleDivider.Render(strings.Repeat("─", max(1, m.width-lipgloss.Width(line))))
+		}
+	}
 	t := style.Render(title)
 	tLen := lipgloss.Width(t)
 	pad := ""
@@ -931,11 +966,59 @@ func (m Model) renderBanner(title string, style lipgloss.Style) string {
 }
 
 func (m Model) renderStatusBar(hints []string) string {
-	bar := strings.Join(hints, "  ·  ")
-	if lipgloss.Width(bar) > m.width-2 {
-		bar = string([]rune(bar)[:max(0, m.width-3)]) + "…"
+	if !m.cfg.Display.ShowHints {
+		return ""
 	}
-	return ui.StyleStatusBar.Render("  " + bar)
+	if m.width < 3 {
+		return ""
+	}
+
+	const separator = "  ·  "
+	available := max(1, m.width-2)
+	parts := make([]string, 0, len(hints))
+	used := 0
+	for _, hint := range hints {
+		part := renderHint(hint)
+		partWidth := lipgloss.Width(part)
+		separatorWidth := 0
+		if len(parts) > 0 {
+			separatorWidth = len(separator)
+		}
+		if used+separatorWidth+partWidth > available {
+			break
+		}
+		parts = append(parts, part)
+		used += separatorWidth + partWidth
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "  " + strings.Join(parts, ui.StyleStatusBar.Render(separator))
+}
+
+// renderHint highlights the actual key while keeping its description muted.
+// Hint strings are intentionally kept as key + description at call sites so
+// the active keymap remains the single source of truth.
+func renderHint(hint string) string {
+	key, description, ok := strings.Cut(strings.TrimSpace(hint), " ")
+	if !ok {
+		return ui.StyleMuted.Render(hint)
+	}
+	return ui.StyleStatusKey.Render(key) + ui.StyleMuted.Render(" "+description)
+}
+
+func clampView(content string, width, height int) string {
+	if width < 1 || height < 1 {
+		return ""
+	}
+	lines := strings.Split(content, "\n")
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	for i, line := range lines {
+		lines[i] = ansi.Truncate(line, max(1, width-1), "")
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m Model) renderProgressBar(progress float64, width int) string {

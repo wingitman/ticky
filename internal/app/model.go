@@ -3,11 +3,14 @@ package app
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
+	"sort"
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
 	"github.com/wingitman/ticky/internal/config"
 	"github.com/wingitman/ticky/internal/overlay"
 	"github.com/wingitman/ticky/internal/report"
@@ -38,6 +41,7 @@ const (
 	ModeUpdatePrompt             // startup update prompt
 	ModeUpdates                  // update history/install screen
 	ModeError                    // unrecoverable error overlay
+	ModeDeletePrompt             // confirmation before deleting a task
 )
 
 // editField indexes which field is focused in the task edit form.
@@ -135,11 +139,15 @@ type Model struct {
 	tmr timer.Timer
 
 	// Edit form state
-	editingTaskID    string
-	editField        editField
-	editActive       bool // true while a text input is being edited (vs. navigating)
-	editInputs       [fieldCount]textinput.Model
-	groupSuggestions []string
+	editingTaskID         string
+	editField             editField
+	editActive            bool // true while a text input is being edited (vs. navigating)
+	editInputs            [fieldCount]textinput.Model
+	groupSuggestions      []string
+	groupCompletionQuery  string
+	groupCompletionValue  string
+	groupCompletionIndex  int
+	groupCompletionActive bool
 
 	// Group list state
 	groupCursor int
@@ -152,6 +160,7 @@ type Model struct {
 	// Task actions sub-menu
 	actionsConfirm taskActionsConfirm
 	actionsCursor  int // selected item in the actions menu (0=pause/resume, 1=stop, 2=complete, 3=abandon)
+	deleteTaskID   string
 
 	// Break prompt state
 	breakPromptEnteredAt time.Time // when ModeBreakPrompt was entered (for debounce)
@@ -369,24 +378,49 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Quit
 
+	case desktopLaunchMsg:
+		if msg.err != nil {
+			m.mode = ModeError
+			m.errorMsg = "Desktop launch failed: " + msg.err.Error()
+		}
+		return m, nil
+
 	case saveErrMsg:
 		m.mode = ModeError
 		m.errorMsg = "Failed to save: " + string(msg)
+		return m, nil
+
+	case configReloadMsg:
+		if msg.err != nil {
+			m.statusMsg = "Config reload failed: " + msg.err.Error()
+			return m, clearStatusCmd()
+		}
+		m.cfg = msg.cfg
+		m.keys = resolveKeys(msg.cfg.Keybinds)
+		m.timeFormatIdx = 0
+		for i, format := range timeFormats {
+			if format == msg.cfg.Display.TimeFormat {
+				m.timeFormatIdx = i
+				break
+			}
+		}
 		return m, nil
 
 	case clearStatusMsg:
 		m.statusMsg = ""
 		return m, nil
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		key := msg.String()
 		switch m.mode {
 		case ModeTaskList:
 			return m.updateTaskList(key)
 		case ModeGroupList:
-			return m.updateGroupList(key)
+			return m.updateGroupList(msg)
 		case ModeEditTask:
 			return m.updateEditTask(msg)
+		case ModeDeletePrompt:
+			return m.updateDeletePrompt(key)
 		case ModeTaskActions:
 			return m.updateTaskActions(key)
 		case ModeTimerFocus, ModeTimerBreak:
@@ -417,20 +451,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if m.mode == ModeEditTask || m.mode == ModePausePrompt || m.mode == ModeCompletion || m.mode == ModeError || m.mode == ModeUpdatePrompt {
+	if m.mode == ModeEditTask || m.mode == ModePausePrompt || m.mode == ModeCompletion || m.mode == ModeError || m.mode == ModeUpdatePrompt || m.mode == ModeDeletePrompt {
 		return m, nil
 	}
 
-	switch msg.Button {
-	case tea.MouseButtonWheelUp:
-		return m.mouseMove(-1)
-	case tea.MouseButtonWheelDown:
-		return m.mouseMove(1)
-	case tea.MouseButtonLeft:
-		if msg.Action != tea.MouseActionPress {
-			return m, nil
+	switch event := msg.(type) {
+	case tea.MouseWheelMsg:
+		mouse := event.Mouse()
+		switch mouse.Button {
+		case tea.MouseWheelUp:
+			return m.mouseMove(-1)
+		case tea.MouseWheelDown:
+			return m.mouseMove(1)
 		}
-		return m.mouseClick(msg.Y)
+	case tea.MouseClickMsg:
+		mouse := event.Mouse()
+		if mouse.Button == tea.MouseLeft {
+			return m.mouseClick(mouse.Y)
+		}
 	}
 	return m, nil
 }
@@ -438,7 +476,7 @@ func (m Model) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 func (m Model) mouseMove(delta int) (tea.Model, tea.Cmd) {
 	switch m.mode {
 	case ModeTaskList:
-		tasks := storage.ActiveTasks(m.store)
+		tasks := m.taskListTasks()
 		if len(tasks) == 0 {
 			m.cursor = 0
 			return m, nil
@@ -562,7 +600,7 @@ func (m Model) mouseClick(y int) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) taskIndexAtRow(y int) int {
-	tasks := storage.ActiveTasks(m.store)
+	tasks := m.taskListTasks()
 	row := 2
 	if m.offset > 0 {
 		row++
@@ -719,7 +757,7 @@ func (m Model) handleAutoStartBreak() (tea.Model, tea.Cmd) {
 // ─── ModeTaskList ─────────────────────────────────────────────────────────────
 
 func (m Model) updateTaskList(key string) (tea.Model, tea.Cmd) {
-	tasks := storage.ActiveTasks(m.store)
+	tasks := m.taskListTasks()
 
 	switch {
 	case matchKey(key, m.keys.up):
@@ -757,11 +795,9 @@ func (m Model) updateTaskList(key string) (tea.Model, tea.Cmd) {
 				m.statusMsg = "Cannot delete a task with an active timer"
 				return m, clearStatusCmd()
 			}
-			storage.DeleteTask(m.store, tasks[m.cursor].ID)
-			if m.cursor > 0 {
-				m.cursor--
-			}
-			return m, saveCmd(m.store)
+			m.deleteTaskID = tasks[m.cursor].ID
+			m.mode = ModeDeletePrompt
+			return m, nil
 		}
 
 	case matchKey(key, m.keys.pause):
@@ -862,6 +898,9 @@ func (m Model) updateTaskList(key string) (tea.Model, tea.Cmd) {
 
 	case matchKey(key, m.keys.options):
 		return m, openConfigCmd()
+
+	case key == "ctrl+p":
+		return m, launchDesktopCmd()
 
 	case matchKey(key, m.keys.close), key == "esc":
 		// If a timer is running, ensure watcher is alive then quit.
@@ -1131,13 +1170,18 @@ func (m Model) beginEditTask(id string) Model {
 	m.mode = ModeEditTask
 	// Pre-populate group suggestions so they show immediately when the form opens.
 	m.groupSuggestions = m.getGroupSuggestions(m.editInputs[fieldGroup].Value())
+	m.resetGroupCompletion()
 	return m
 }
 
-func (m Model) updateEditTask(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) updateEditTask(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
 	if m.editActive {
+		if m.editField == fieldGroup && (key == "tab" || key == "shift+tab") {
+			m.cycleGroupSuggestion(key == "shift+tab")
+			return m, nil
+		}
 		switch {
 		case matchKey(key, m.keys.confirm):
 			m.editInputs[m.editField].Blur()
@@ -1155,6 +1199,7 @@ func (m Model) updateEditTask(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 		if m.editField == fieldGroup {
 			m.groupSuggestions = m.getGroupSuggestions(m.editInputs[fieldGroup].Value())
+			m.resetGroupCompletion()
 		}
 		return m, cmd
 	}
@@ -1170,10 +1215,10 @@ func (m Model) updateEditTask(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.editInputs[m.editField].Focus()
 		if m.editField == fieldGroup {
 			m.groupSuggestions = m.getGroupSuggestions(m.editInputs[fieldGroup].Value())
+			m.resetGroupCompletion()
 		}
-		var cmd tea.Cmd
-		m.editInputs[m.editField], cmd = m.editInputs[m.editField].Update(msg)
-		return m, tea.Batch(cmd, textinput.Blink)
+		// The mode-changing key must not become the first character in the field.
+		return m, textinput.Blink
 
 	case matchKey(key, m.keys.confirm):
 		m.groupSuggestions = nil
@@ -1204,6 +1249,48 @@ func (m Model) updateEditTask(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m *Model) resetGroupCompletion() {
+	m.groupCompletionQuery = m.editInputs[fieldGroup].Value()
+	m.groupCompletionValue = m.groupCompletionQuery
+	m.groupCompletionIndex = -1
+	m.groupCompletionActive = false
+}
+
+func (m *Model) cycleGroupSuggestion(reverse bool) {
+	query := m.editInputs[fieldGroup].Value()
+	if !m.groupCompletionActive {
+		m.groupCompletionQuery = query
+		m.groupCompletionValue = query
+		m.groupCompletionActive = true
+		if reverse {
+			m.groupCompletionIndex = len(m.groupSuggestions)
+		} else {
+			m.groupCompletionIndex = -1
+		}
+	}
+	if len(m.groupSuggestions) == 0 {
+		return
+	}
+	if reverse {
+		m.groupCompletionIndex--
+		if m.groupCompletionIndex < 0 {
+			m.editInputs[fieldGroup].SetValue(m.groupCompletionValue)
+			m.groupCompletionActive = false
+			m.groupCompletionIndex = -1
+			return
+		}
+	} else {
+		m.groupCompletionIndex++
+		if m.groupCompletionIndex >= len(m.groupSuggestions) {
+			m.editInputs[fieldGroup].SetValue(m.groupCompletionValue)
+			m.groupCompletionActive = false
+			m.groupCompletionIndex = -1
+			return
+		}
+	}
+	m.editInputs[fieldGroup].SetValue(m.groupSuggestions[m.groupCompletionIndex])
 }
 
 // adjustEditNumericField increments or decrements the value of the currently
@@ -1274,6 +1361,27 @@ func (m Model) commitEditTask() (tea.Model, tea.Cmd) {
 	return m, saveCmd(m.store)
 }
 
+func (m Model) updateDeletePrompt(key string) (tea.Model, tea.Cmd) {
+	switch {
+	case matchKey(key, m.keys.confirm):
+		storage.DeleteTask(m.store, m.deleteTaskID)
+		m.deleteTaskID = ""
+		m.mode = ModeTaskList
+		tasks := m.taskListTasks()
+		if len(tasks) == 0 {
+			m.cursor = 0
+		} else if m.cursor >= len(tasks) {
+			m.cursor = len(tasks) - 1
+		}
+		m.clampTaskScroll()
+		return m, saveCmd(m.store)
+	case matchKey(key, m.keys.close), key == "esc":
+		m.deleteTaskID = ""
+		m.mode = ModeTaskList
+	}
+	return m, nil
+}
+
 func (m *Model) findOrCreateGroup(name string) string {
 	for _, g := range m.store.Groups {
 		if g.Name == name {
@@ -1287,7 +1395,8 @@ func (m *Model) findOrCreateGroup(name string) string {
 
 // ─── ModeGroupList ────────────────────────────────────────────────────────────
 
-func (m Model) updateGroupList(key string) (tea.Model, tea.Cmd) {
+func (m Model) updateGroupList(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	key := msg.String()
 	switch {
 	case matchKey(key, m.keys.up):
 		if m.groupCursor > 0 {
@@ -1316,7 +1425,7 @@ func (m Model) updateGroupList(key string) (tea.Model, tea.Cmd) {
 			return m, saveCmd(m.store)
 		}
 
-	case key == "enter":
+	case matchKey(key, m.keys.confirm):
 		if m.editGroupID == "new" {
 			name := m.pauseInput.Value()
 			if name != "" {
@@ -1337,8 +1446,8 @@ func (m Model) updateGroupList(key string) (tea.Model, tea.Cmd) {
 
 	if m.editGroupID == "new" {
 		var cmd tea.Cmd
-		m.pauseInput, cmd = m.pauseInput.Update(tea.KeyMsg{Type: tea.KeyRunes})
-		_ = cmd
+		m.pauseInput, cmd = m.pauseInput.Update(msg)
+		return m, cmd
 	}
 
 	return m, nil
@@ -1376,7 +1485,7 @@ func (m Model) updateTimer(key string) (tea.Model, tea.Cmd) {
 
 // ─── ModePausePrompt ─────────────────────────────────────────────────────────
 
-func (m Model) updatePausePrompt(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) updatePausePrompt(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
 	switch {
@@ -1618,7 +1727,12 @@ func (m Model) updateCompleted(key string) (tea.Model, tea.Cmd) {
 // ─── Scroll helpers ───────────────────────────────────────────────────────────
 
 func (m *Model) visibleTaskRows() int {
+	// A grouped list can need one header row per task. Reserve conservatively so
+	// headers do not push the status bar outside a short terminal.
 	reserved := 5
+	if len(m.store.Groups) > 0 {
+		return max(1, (m.height-reserved)/2)
+	}
 	return max(1, m.height-reserved)
 }
 
@@ -1658,6 +1772,11 @@ type saveErrMsg string
 type clearStatusMsg struct{}
 type updateCheckMsg struct{ info appupdate.Info }
 type updateLaunchMsg struct{ err string }
+type configReloadMsg struct {
+	cfg *config.Config
+	err error
+}
+type desktopLaunchMsg struct{ err error }
 
 // completionTotalFrames is how many animation frames to show (~2s at 10fps).
 const completionTotalFrames = 20
@@ -1685,7 +1804,8 @@ func saveCmd(s *storage.Store) tea.Cmd {
 		if err := storage.Save(s); err != nil {
 			return saveErrMsg(err.Error())
 		}
-		return nil
+		cfg, loadErr := config.Load()
+		return configReloadMsg{cfg: cfg, err: loadErr}
 	}
 }
 
@@ -1748,8 +1868,51 @@ func openConfigCmd() tea.Cmd {
 		if err != nil {
 			return saveErrMsg("editor error: " + err.Error())
 		}
-		return nil
+		cfg, loadErr := config.Load()
+		return configReloadMsg{cfg: cfg, err: loadErr}
 	})
+}
+
+func launchDesktopCmd() tea.Cmd {
+	return func() tea.Msg {
+		self, err := os.Executable()
+		if err != nil {
+			return desktopLaunchMsg{err: err}
+		}
+		desktopBinary := filepath.Join(filepath.Dir(self), "ticky-desktop")
+		if runtime.GOOS == "windows" {
+			desktopBinary += ".exe"
+		}
+		if _, statErr := os.Stat(desktopBinary); statErr == nil {
+			self = desktopBinary
+			cmd := exec.Command(self)
+			cmd.Stdin = nil
+			cmd.Stdout = nil
+			cmd.Stderr = nil
+			setDetachedProcAttr(cmd)
+			if err := cmd.Start(); err != nil {
+				return desktopLaunchMsg{err: err}
+			}
+			_ = cmd.Process.Release()
+			return desktopLaunchMsg{}
+		}
+		var cmd *exec.Cmd
+		if _, statErr := os.Stat("go.mod"); statErr == nil {
+			// This keeps Ctrl+P useful when running the project with `go run`.
+			cmd = exec.Command("go", "run", "-tags", "desktop", "./cmd/ticky-desktop")
+		} else {
+			cmd = exec.Command(self, "--desktop")
+		}
+		cmd.Stdin = nil
+		cmd.Stdout = nil
+		cmd.Stderr = nil
+		setDetachedProcAttr(cmd)
+		if err := cmd.Start(); err != nil {
+			return desktopLaunchMsg{err: err}
+		}
+		_ = cmd.Process.Release()
+		return desktopLaunchMsg{}
+	}
 }
 
 // launchWatcherCmd kills any existing watcher, then starts a fresh
@@ -1902,6 +2065,28 @@ func (m Model) getGroupSuggestions(input string) []string {
 		}
 	}
 	return matches
+}
+
+// taskListTasks returns a stable display projection grouped by configured group
+// order. It deliberately leaves persisted task order untouched.
+func (m Model) taskListTasks() []storage.Task {
+	tasks := storage.ActiveTasks(m.store)
+	groupOrder := make(map[string]int, len(m.store.Groups))
+	for i, group := range m.store.Groups {
+		groupOrder[group.ID] = i
+	}
+	sort.SliceStable(tasks, func(i, j int) bool {
+		left, leftOK := groupOrder[tasks[i].GroupID]
+		right, rightOK := groupOrder[tasks[j].GroupID]
+		if !leftOK {
+			left = len(groupOrder)
+		}
+		if !rightOK {
+			right = len(groupOrder)
+		}
+		return left < right
+	})
+	return tasks
 }
 
 // fuzzyMatch returns true when every rune in needle appears in haystack in order.

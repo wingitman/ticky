@@ -1,6 +1,6 @@
 package ui
 
-import "github.com/charmbracelet/lipgloss"
+import "charm.land/lipgloss/v2"
 
 // Colour palette — all colours defined once and referenced by style vars.
 var (
@@ -14,6 +14,12 @@ var (
 	colorBreak    = lipgloss.Color("#A47CF0") // break phase accent
 	colorHeader   = lipgloss.Color("#EEEEFF") // bright header text
 	colorWarning  = lipgloss.Color("#F0D07C") // warning / paused
+	colorBrand    = lipgloss.Color("#5865F2")
+)
+
+var (
+	BrandDelby = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF")).Bold(true)
+	BrandSoft  = lipgloss.NewStyle().Foreground(colorBrand).Bold(true)
 )
 
 // ─── Text styles ─────────────────────────────────────────────────────────────

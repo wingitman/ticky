@@ -21,6 +21,9 @@ func TestDefault(t *testing.T) {
 	if cfg.Keybinds.ShowUpdates != "U" {
 		t.Errorf("expected show_updates keybind 'U', got %q", cfg.Keybinds.ShowUpdates)
 	}
+	if !cfg.Display.ShowHints || !cfg.Display.ShowLogo {
+		t.Error("expected hints and logo to be enabled by default")
+	}
 }
 
 func TestLoadCreatesDefaultFile(t *testing.T) {

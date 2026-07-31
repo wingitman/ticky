@@ -4,7 +4,7 @@ A pomodoro-based focus timer and task scheduler for the terminal. Start a task, 
 
 Supports unconventional time formats: T-shirt sizes, story points, and more.
 
-Built with [BubbleTea](https://github.com/charmbracelet/bubbletea) and [Lipgloss](https://github.com/charmbracelet/lipgloss).
+Built with [Bubble Tea v2](https://github.com/charmbracelet/bubbletea) and [Lip Gloss v2](https://github.com/charmbracelet/lipgloss).
 
 > Made by [delbysoft](https://github.com/wingitman)
 
@@ -107,6 +107,15 @@ Removes the binary from `~/.local/bin` and removes the ticky prompt integration 
 ```bash
 ticky
 ```
+
+Press `ctrl+p` from the task list to open the detached desktop window. The
+desktop view shares tasks and timer state with the TUI. Press `w` in that
+window to switch between the full task view and the compact widget; `p` pauses,
+`x` stops, and `q` closes the window.
+
+The desktop frontend is built as the sibling `ticky-desktop` executable. A
+native source build creates it automatically; portable cross-platform CLI
+release builds remain available without requiring a graphics toolchain.
 
 ### Task list
 
@@ -384,6 +393,12 @@ show_updates = "U"    # show update history and installers
 # Options: minutes | seconds | hhmm | tshirt | points
 time_format = "minutes"
 
+# Show the delbysoft wordmark in the title bar.
+show_logo = true
+
+# Show context-sensitive keyboard hints.
+show_hints = true
+
 # Show the active task name in a terminal corner when a timer is running.
 # Add 'ticky --status' to your shell prompt to display this outside ticky.
 show_task_name = false
@@ -425,6 +440,7 @@ down = "j"
 ```bash
 make build    # → bin/ticky
 make install  # build + install to ~/.local/bin
+make build-all # build Linux, macOS, and Windows release binaries
 make test     # run unit tests
 make clean
 make uninstall
@@ -435,6 +451,8 @@ make uninstall
 ```powershell
 go build -ldflags='-s -w' -o bin\ticky.exe .   # build only
 .\install.ps1                                    # build + install
+.\install.ps1 -BuildAll                          # build all release binaries
+.\install.ps1 --build-all                        # equivalent flag spelling
 .\uninstall.ps1                                  # uninstall
 ```
 

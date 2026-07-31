@@ -14,6 +14,7 @@
 
 param(
     [switch]$Update,
+    [Alias('build-all', '--build-all')]
     [switch]$BuildAll
 )
 
@@ -24,8 +25,12 @@ $BinaryName  = 'ticky.exe'
 $InstallDir  = Join-Path $env:LOCALAPPDATA 'Programs\ticky'
 $BuildDir    = Join-Path $PSScriptRoot 'bin'
 $BinaryBuild = Join-Path $BuildDir $BinaryName
+$DesktopBinaryName = 'ticky-desktop.exe'
+$DesktopBuild = Join-Path $BuildDir $DesktopBinaryName
+$DesktopDest = Join-Path $InstallDir $DesktopBinaryName
 $BinaryDest  = Join-Path $InstallDir $BinaryName
 $ReleaseBin  = Join-Path $PSScriptRoot 'releases\windows\ticky.exe'
+$ReleaseDesktop = Join-Path $PSScriptRoot 'releases\windows\ticky-desktop.exe'
 
 function Write-Step([string]$msg) {
     Write-Host "==> $msg" -ForegroundColor Cyan
@@ -65,16 +70,22 @@ if ($BuildAll) {
         New-Item -ItemType Directory -Path (Split-Path $out) -Force | Out-Null
         $env:GOOS = $t.GOOS
         $env:GOARCH = $t.GOARCH
+        $env:CGO_ENABLED = '0'
         & go build -ldflags="-s -w -X github.com/wingitman/ticky/internal/version.Commit=$Commit" -o $out .
         if ($LASTEXITCODE -ne 0) { Write-Host "ERROR: build failed for $($t.GOOS)/$($t.GOARCH)." -ForegroundColor Red; exit 1 }
         Write-Ok $t.Out
     }
     $env:GOOS = $null
     $env:GOARCH = $null
+    $env:CGO_ENABLED = $null
     Write-Host ''
     Write-Host '  Pre-built binaries written to releases\' -ForegroundColor Green
     exit 0
 }
+
+# Detached update scripts call this installer after checking out the target
+# commit. Do not modify shell profiles or print first-install instructions.
+$SkipShellIntegration = $Update
 
 if (Get-Command go -ErrorAction SilentlyContinue) {
     Write-Step 'Go found - building ticky from source...'
@@ -85,6 +96,8 @@ if (Get-Command go -ErrorAction SilentlyContinue) {
     & go build -ldflags="-s -w -X github.com/wingitman/ticky/internal/version.Commit=$Commit" -o $BinaryBuild .
     if ($LASTEXITCODE -ne 0) { Write-Host 'ERROR: go build failed.' -ForegroundColor Red; exit 1 }
     Write-Ok "Built: $BinaryBuild"
+    & go build -tags desktop -ldflags="-s -w -X github.com/wingitman/ticky/internal/version.Commit=$Commit" -o $DesktopBuild ./cmd/ticky-desktop
+    if ($LASTEXITCODE -ne 0) { Write-Host 'ERROR: desktop build failed.' -ForegroundColor Red; exit 1 }
     $SourceBin = $BinaryBuild
 } else {
     Write-Step 'Go not found - using pre-built binary from releases\windows\...'
@@ -105,6 +118,11 @@ if (-not (Test-Path $InstallDir)) {
     New-Item -ItemType Directory -Path $InstallDir | Out-Null
 }
 Copy-Item -Path $SourceBin -Destination $BinaryDest -Force
+if (Test-Path $DesktopBuild) {
+    Copy-Item -Path $DesktopBuild -Destination $DesktopDest -Force
+} elseif (Test-Path $ReleaseDesktop) {
+    Copy-Item -Path $ReleaseDesktop -Destination $DesktopDest -Force
+}
 Write-Ok "Installed: $BinaryDest"
 
 # ---------------------------------------------------------------------------
@@ -145,6 +163,7 @@ if (($env:PATH -split ';') -notcontains $InstallDir) {
 # ---------------------------------------------------------------------------
 # 5. Shell prompt integration
 # ---------------------------------------------------------------------------
+if (-not $SkipShellIntegration) {
 Write-Step 'Setting up shell prompt integration...'
 
 # ── tmux (live updates, additive — runs alongside shell prompt method) ──────
@@ -202,6 +221,7 @@ if (Test-Path $ProfilePath) {
 }
 
 } # end if (-not $TmuxCfgPath)
+} # end if (-not $SkipShellIntegration)
 
 # ---------------------------------------------------------------------------
 # 6. Done
@@ -210,7 +230,11 @@ $ConfigFile = Join-Path $env:APPDATA 'delbysoft\ticky.toml'
 $DataFile   = Join-Path $env:APPDATA 'delbysoft\tasks.toml'
 
 Write-Host ''
-Write-Host '  ticky installed successfully!' -ForegroundColor Green
+if ($Update) {
+    Write-Host '  ticky updated successfully!' -ForegroundColor Green
+} else {
+    Write-Host '  ticky installed successfully!' -ForegroundColor Green
+}
 Write-Host ''
 Write-Host '  To show the active task in your prompt, open ticky and press o,' -ForegroundColor White
 Write-Host '  then enable these options in ticky.toml:' -ForegroundColor White

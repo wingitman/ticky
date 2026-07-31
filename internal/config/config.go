@@ -38,6 +38,8 @@ var keybindEntries = []struct{ key, comment string }{
 // migration checks (values are written from the Config struct directly).
 var displayEntries = []string{
 	"time_format",
+	"show_hints",
+	"show_logo",
 	"show_task_name",
 	"show_time_left",
 	"overlay_corner",
@@ -89,6 +91,12 @@ type Display struct {
 	// TimeFormat controls how durations are shown.
 	// Valid values: minutes | seconds | hhmm | tshirt | points
 	TimeFormat string `toml:"time_format"`
+
+	// ShowHints controls the context-sensitive hint bar.
+	ShowHints bool `toml:"show_hints"`
+
+	// ShowLogo controls the delbysoft wordmark in the title bar.
+	ShowLogo bool `toml:"show_logo"`
 
 	// ShowTaskName renders the active task name in a terminal corner.
 	// Only has effect when a task timer is running.
@@ -150,6 +158,8 @@ func Default() *Config {
 		},
 		Display: Display{
 			TimeFormat:              "minutes",
+			ShowHints:               true,
+			ShowLogo:                true,
 			ShowTaskName:            false,
 			ShowTimeLeft:            false,
 			OverlayCorner:           "top-right",
@@ -371,13 +381,17 @@ func migratedTOML(cfg *Config) string {
 	u := cfg.Updates
 	out := "# ticky configuration file\n" +
 		"# Edit keybinds and display preferences below.\n" +
-		"# Restart ticky for changes to take effect.\n\n" +
+		"# Changes are reloaded when you close the editor.\n\n" +
 		"[keybinds]\n"
 	out += keybindsTOML(&cfg.Keybinds)
 	out += "\n[display]\n" +
 		"# How task durations are displayed.\n" +
 		"# Options: minutes | seconds | hhmm | tshirt | points\n" +
 		"time_format = " + quote(d.TimeFormat) + "\n\n" +
+		"# Show the delbysoft wordmark in the title bar.\n" +
+		"show_logo = " + boolStr(d.ShowLogo) + "\n\n" +
+		"# Show context-sensitive keyboard hints.\n" +
+		"show_hints = " + boolStr(d.ShowHints) + "\n\n" +
 		"# Show the active task name in a terminal corner when a timer is running.\n" +
 		"# Use 'ticky --status' in your shell prompt to display this outside ticky.\n" +
 		"show_task_name = " + boolStr(d.ShowTaskName) + "\n\n" +

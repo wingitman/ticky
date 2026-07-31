@@ -6,9 +6,10 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/wingitman/ticky/internal/app"
 	"github.com/wingitman/ticky/internal/config"
+	"github.com/wingitman/ticky/internal/desktop"
 	"github.com/wingitman/ticky/internal/overlay"
 	"github.com/wingitman/ticky/internal/session"
 	"github.com/wingitman/ticky/internal/storage"
@@ -26,6 +27,12 @@ func main() {
 	}
 
 	switch {
+	case hasFlag(args, "--desktop"):
+		if err := desktop.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "ticky desktop: %v\n", err)
+			os.Exit(1)
+		}
+
 	case hasFlag(args, "--watch"):
 		runWatch()
 
@@ -74,15 +81,13 @@ func runTUI(ttyPath string) {
 		ttyFile, err := os.OpenFile(ttyPath, os.O_RDWR, 0)
 		if err == nil {
 			p = tea.NewProgram(model,
-				tea.WithAltScreen(),
-				tea.WithMouseCellMotion(),
 				tea.WithInput(ttyFile),
 				tea.WithOutput(ttyFile),
 			)
 		}
 	}
 	if p == nil {
-		p = tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
+		p = tea.NewProgram(model)
 	}
 
 	if _, err := p.Run(); err != nil {

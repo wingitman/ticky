@@ -52,6 +52,10 @@ func setSysProcAttr(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
+func setDetachedProcAttr(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+}
+
 // killWatcher terminates the background --watch process recorded in the session.
 // Safe to call when no watcher is running (WatchPID == 0 or process already gone).
 func killWatcher(sess *session.Session) {

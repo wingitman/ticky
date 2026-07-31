@@ -252,7 +252,7 @@ func writeUnixScript(req InstallRequest) (string, error) {
 	} else {
 		b.WriteString("git checkout --detach \"$target\"\n")
 	}
-	b.WriteString("make install\n")
+	b.WriteString("make install UPDATE=1\n")
 	b.WriteString("installed=$(git rev-parse HEAD)\n")
 	b.WriteString("if [ -n \"$recorder\" ] && [ -x \"$recorder\" ]; then \"$recorder\" --record-update --update-commit \"$installed\" --update-repo \"$repo\"; fi\n")
 	b.WriteString("if [ \"$restore_ref\" != HEAD ]; then git checkout \"$restore_ref\" >/dev/null 2>&1 || true; fi\n")
