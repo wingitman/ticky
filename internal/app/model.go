@@ -1826,7 +1826,7 @@ func clearStatusCmd() tea.Cmd {
 
 func checkUpdatesCmd(cfg *config.Config) tea.Cmd {
 	return func() tea.Msg {
-		return updateCheckMsg{info: appupdate.Check(cfg, version.Commit, 20)}
+		return updateCheckMsg{info: appupdate.Check(cfg, version.Current(), 20)}
 	}
 }
 

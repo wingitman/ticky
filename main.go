@@ -56,9 +56,10 @@ func runTUI(ttyPath string) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ticky: config warning: %v\n", err)
 	}
-	if version.Commit != "" && version.Commit != "dev" && cfg.Updates.CurrentCommit != version.Commit {
-		cfg.Updates.CurrentCommit = version.Commit
-		_ = config.RecordUpdateMetadata(version.Commit, cfg.Updates.RepoPath)
+	currentVersion := version.Current()
+	if currentVersion != "" && currentVersion != "dev" && cfg.Updates.CurrentCommit != currentVersion {
+		cfg.Updates.CurrentCommit = currentVersion
+		_ = config.RecordUpdateMetadata(currentVersion, cfg.Updates.RepoPath)
 	}
 
 	store, err := storage.Load()

@@ -236,28 +236,35 @@ func writeUnixScript(req InstallRequest) (string, error) {
 	}
 	path := filepath.Join(dir, fmt.Sprintf("update-%d.sh", time.Now().UnixNano()))
 	var b bytes.Buffer
-	b.WriteString("#!/bin/sh\nset -eu\n")
+	b.WriteString("#!/bin/sh\nset -u\n")
 	b.WriteString("repo=" + shQuote(req.RepoPath) + "\n")
 	b.WriteString("target=" + shQuote(req.TargetCommit) + "\n")
 	b.WriteString("recorder=" + shQuote(req.RecorderBinary) + "\n")
-	b.WriteString("cd \"$repo\"\n")
-	b.WriteString("prev_ref=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || printf HEAD)\n")
+	b.WriteString("prev_ref=HEAD\n")
+	b.WriteString("status=0\n")
+	b.WriteString("cd \"$repo\" || status=1\n")
+	b.WriteString("if [ \"$status\" -eq 0 ]; then prev_ref=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || printf HEAD); fi\n")
 	b.WriteString("restore_ref=$prev_ref\n")
-	b.WriteString("git fetch --prune --all\n")
+	b.WriteString("if [ \"$status\" -eq 0 ]; then git fetch --prune --all || status=$?; fi\n")
 	if req.Latest {
-		b.WriteString("if [ \"$prev_ref\" != HEAD ]; then\n")
-		b.WriteString("  if git rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1; then git pull --ff-only; else git merge --ff-only \"origin/$prev_ref\"; fi\n")
-		b.WriteString("elif [ -n \"$target\" ]; then git checkout --detach \"$target\"\n")
+		b.WriteString("if [ \"$status\" -eq 0 ] && [ \"$prev_ref\" != HEAD ]; then\n")
+		b.WriteString("  if git rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1; then git pull --ff-only || status=$?; else git merge --ff-only \"origin/$prev_ref\" || status=$?; fi\n")
+		b.WriteString("elif [ \"$status\" -eq 0 ] && [ -n \"$target\" ]; then git checkout --detach \"$target\" || status=$?\n")
 		b.WriteString("fi\n")
 	} else {
-		b.WriteString("git checkout --detach \"$target\"\n")
+		b.WriteString("if [ \"$status\" -eq 0 ]; then git checkout --detach \"$target\" || status=$?; fi\n")
 	}
-	b.WriteString("make install UPDATE=1\n")
-	b.WriteString("installed=$(git rev-parse HEAD)\n")
-	b.WriteString("if [ -n \"$recorder\" ] && [ -x \"$recorder\" ]; then \"$recorder\" --record-update --update-commit \"$installed\" --update-repo \"$repo\"; fi\n")
-	b.WriteString("if [ \"$restore_ref\" != HEAD ]; then git checkout \"$restore_ref\" >/dev/null 2>&1 || true; fi\n")
-	b.WriteString("printf '\\nticky update complete: %s\\n' \"$installed\"\n")
-	b.WriteString("printf 'Press Enter to close...'; read _\n")
+	b.WriteString("if [ \"$status\" -eq 0 ]; then make install UPDATE=1 || status=$?; fi\n")
+	b.WriteString("installed=$(git rev-parse HEAD 2>/dev/null || printf unknown)\n")
+	b.WriteString("if [ \"$status\" -eq 0 ] && [ -n \"$recorder\" ] && [ -x \"$recorder\" ]; then \"$recorder\" --record-update --update-commit \"$installed\" --update-repo \"$repo\" || status=$?; fi\n")
+	b.WriteString("finish() {\n")
+	b.WriteString("  code=$status\n")
+	b.WriteString("  if [ \"$restore_ref\" != HEAD ]; then git checkout \"$restore_ref\" >/dev/null 2>&1 || code=1; fi\n")
+	b.WriteString("  if [ \"$code\" -eq 0 ]; then printf '\\nticky update complete: %s\\n' \"$installed\"; else printf '\\nticky update failed (exit %s). Review the output above.\\n' \"$code\"; fi\n")
+	b.WriteString("  printf 'Press Enter to close...'; read _ || true\n")
+	b.WriteString("  exit \"$code\"\n")
+	b.WriteString("}\n")
+	b.WriteString("finish\n")
 	if err := os.WriteFile(path, b.Bytes(), 0755); err != nil {
 		return "", err
 	}
@@ -288,30 +295,42 @@ func writeWindowsScript(req InstallRequest) (string, error) {
 	if req.Latest {
 		latest = "$true"
 	}
-	content := fmt.Sprintf(`$ErrorActionPreference = 'Stop'
+	content := fmt.Sprintf(`$ErrorActionPreference = 'Continue'
 $repo = %s
-$target = %s
-$recorder = %s
-$latest = %s
-Set-Location $repo
-$prevRef = (git rev-parse --abbrev-ref HEAD).Trim()
-git fetch --prune --all
+ $target = %s
+ $recorder = %s
+ $latest = %s
+ $status = 0
+ $prevRef = 'HEAD'
+ try { Set-Location -LiteralPath $repo } catch { Write-Host "Could not open update repository: $repo"; $status = 1 }
+ if ($status -eq 0) {
+     $prevRef = (git rev-parse --abbrev-ref HEAD).Trim()
+     if ($LASTEXITCODE -ne 0) { $status = $LASTEXITCODE; $prevRef = 'HEAD' }
+ }
+if ($status -eq 0) { git fetch --prune --all }
+if ($LASTEXITCODE -ne 0) { $status = $LASTEXITCODE }
 if ($latest) {
-    if ($prevRef -ne 'HEAD') {
+    if ($status -eq 0 -and $prevRef -ne 'HEAD') {
         git rev-parse --abbrev-ref --symbolic-full-name '@{u}' *> $null
         if ($LASTEXITCODE -eq 0) { git pull --ff-only } else { git merge --ff-only "origin/$prevRef" }
-    } elseif ($target) {
+        if ($LASTEXITCODE -ne 0) { $status = $LASTEXITCODE }
+    } elseif ($status -eq 0 -and $target) {
         git checkout --detach $target
+        if ($LASTEXITCODE -ne 0) { $status = $LASTEXITCODE }
     }
-} else {
+} elseif ($status -eq 0) {
     git checkout --detach $target
+    if ($LASTEXITCODE -ne 0) { $status = $LASTEXITCODE }
 }
-& .\install.ps1 -Update
+if ($status -eq 0) {
+    & .\install.ps1 -Update
+    if ($LASTEXITCODE -ne 0) { $status = $LASTEXITCODE }
+}
 $installed = (git rev-parse HEAD).Trim()
-if ($recorder -and (Test-Path $recorder)) { & $recorder --record-update --update-commit $installed --update-repo $repo }
-if ($prevRef -ne 'HEAD') { git checkout $prevRef | Out-Null }
+if ($status -eq 0 -and $recorder -and (Test-Path $recorder)) { & $recorder --record-update --update-commit $installed --update-repo $repo; if ($LASTEXITCODE -ne 0) { $status = $LASTEXITCODE } }
+if ($prevRef -ne 'HEAD') { git checkout $prevRef | Out-Null; if ($LASTEXITCODE -ne 0) { $status = 1 } }
 Write-Host ""
-Write-Host "ticky update complete: $installed" -ForegroundColor Green
+if ($status -eq 0) { Write-Host "ticky update complete: $installed" -ForegroundColor Green } else { Write-Host "ticky update failed (exit $status). Review the output above." -ForegroundColor Red }
 Read-Host 'Press Enter to close'
 `, psQuote(req.RepoPath), psQuote(req.TargetCommit), psQuote(req.RecorderBinary), latest)
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {

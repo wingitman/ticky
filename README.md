@@ -56,7 +56,8 @@ This builds the binary, installs it to `%LOCALAPPDATA%\Programs\ticky\`, adds th
 
 ### macOS / Linux
 
-Requires `make` and Go.
+Requires `make`. Go is optional when the matching pre-built binary is present
+under `releases/`.
 
 ```bash
 git clone https://github.com/wingitman/ticky.git
@@ -64,7 +65,11 @@ cd ticky
 make install
 ```
 
-This builds the binary, copies it to `~/.local/bin/ticky`, and automatically sets up the shell prompt integration for your active prompt system (starship, bash, zsh, or fish). Make sure `~/.local/bin` is on your `PATH`.
+When Go is installed, this builds the binary from source. Without Go, it uses
+the pre-built binary for the current OS and architecture. In both cases it
+copies ticky to `~/.local/bin/ticky` and automatically sets up the shell prompt
+integration for your active prompt system (starship, bash, zsh, or fish). Make
+sure `~/.local/bin` is on your `PATH`.
 
 After installing, **enable the overlay** in `ticky.toml` (press `o` inside ticky to open it):
 
@@ -422,6 +427,12 @@ terminal = ""           # optional terminal command for detached updates
 Normal TUI launches check the configured source checkout with `git fetch --prune --all`. `--watch`, `--status`, and `--check` never run update prompts.
 
 Updates run in a separate terminal and ticky exits before the installer starts. The updater uses your checkout's current branch/upstream, so forks and feature branches are preserved. Press `U` to review recent commits, expand commit descriptions, install latest, or install an older history commit.
+
+The detached installer follows the same source/pre-built workflow as a fresh
+install: it builds from source when Go is available and otherwise installs the
+matching binary from `releases/`. The update terminal remains open and prints
+the installer output when an update fails, so missing Go, `make`, release files,
+or network access produce an actionable error instead of silently closing.
 
 ### Vim-style keybinds
 
