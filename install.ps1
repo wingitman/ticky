@@ -14,6 +14,7 @@
 
 param(
     [switch]$Update,
+    [string]$BuildDirOverride = '',
     [Alias('build-all', '--build-all')]
     [switch]$BuildAll
 )
@@ -23,7 +24,7 @@ $ErrorActionPreference = 'Stop'
 
 $BinaryName  = 'ticky.exe'
 $InstallDir  = Join-Path $env:LOCALAPPDATA 'Programs\ticky'
-$BuildDir    = Join-Path $PSScriptRoot 'bin'
+$BuildDir    = if ($BuildDirOverride) { $BuildDirOverride } else { Join-Path $PSScriptRoot 'bin' }
 $BinaryBuild = Join-Path $BuildDir $BinaryName
 $DesktopBinaryName = 'ticky-desktop.exe'
 $DesktopBuild = Join-Path $BuildDir $DesktopBinaryName

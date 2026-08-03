@@ -240,31 +240,32 @@ func writeUnixScript(req InstallRequest) (string, error) {
 	b.WriteString("repo=" + shQuote(req.RepoPath) + "\n")
 	b.WriteString("target=" + shQuote(req.TargetCommit) + "\n")
 	b.WriteString("recorder=" + shQuote(req.RecorderBinary) + "\n")
+	b.WriteString("log=" + shQuote(filepath.Join(dir, fmt.Sprintf("update-%d.log", time.Now().UnixNano()))) + "\n")
+	b.WriteString("work=\"\"\n")
 	b.WriteString("prev_ref=HEAD\n")
 	b.WriteString("status=0\n")
-	b.WriteString("cd \"$repo\" || status=1\n")
-	b.WriteString("if [ \"$status\" -eq 0 ]; then prev_ref=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || printf HEAD); fi\n")
-	b.WriteString("restore_ref=$prev_ref\n")
-	b.WriteString("if [ \"$status\" -eq 0 ]; then git fetch --prune --all || status=$?; fi\n")
+	b.WriteString(": >\"$log\"\n")
+	b.WriteString("printf 'ticky update started\\n' | tee -a \"$log\"\n")
+	b.WriteString("prev_ref=$(git -C \"$repo\" rev-parse --abbrev-ref HEAD 2>/dev/null || printf HEAD)\n")
+	b.WriteString("if [ \"$prev_ref\" != HEAD ]; then upstream=$(git -C \"$repo\" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || printf 'origin/%s' \"$prev_ref\"); else upstream=HEAD; fi\n")
+	b.WriteString("git -C \"$repo\" fetch --prune --all >>\"$log\" 2>&1 || status=$?\n")
 	if req.Latest {
-		b.WriteString("if [ \"$status\" -eq 0 ] && [ \"$prev_ref\" != HEAD ]; then\n")
-		b.WriteString("  if git rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1; then git pull --ff-only || status=$?; else git merge --ff-only \"origin/$prev_ref\" || status=$?; fi\n")
-		b.WriteString("elif [ \"$status\" -eq 0 ] && [ -n \"$target\" ]; then git checkout --detach \"$target\" || status=$?\n")
-		b.WriteString("fi\n")
+		b.WriteString("if [ \"$status\" -eq 0 ] && [ \"$prev_ref\" != HEAD ]; then target=$(git -C \"$repo\" rev-parse \"$upstream\" 2>>\"$log\") || status=$?; fi\n")
+		b.WriteString("if [ \"$status\" -eq 0 ] && [ \"$prev_ref\" = HEAD ] && [ -z \"$target\" ]; then target=$(git -C \"$repo\" rev-parse HEAD 2>>\"$log\") || status=$?; fi\n")
+		b.WriteString("if [ \"$status\" -eq 0 ] && [ -z \"$target\" ]; then status=1; printf 'Could not resolve the latest update target.\\n' >>\"$log\"; fi\n")
 	} else {
-		b.WriteString("if [ \"$status\" -eq 0 ]; then git checkout --detach \"$target\" || status=$?; fi\n")
+		b.WriteString("if [ \"$status\" -eq 0 ] && [ -z \"$target\" ]; then status=1; printf 'No update target was provided.\\n' >>\"$log\"; fi\n")
 	}
-	b.WriteString("if [ \"$status\" -eq 0 ]; then make install UPDATE=1 || status=$?; fi\n")
-	b.WriteString("installed=$(git rev-parse HEAD 2>/dev/null || printf unknown)\n")
-	b.WriteString("if [ \"$status\" -eq 0 ] && [ -n \"$recorder\" ] && [ -x \"$recorder\" ]; then \"$recorder\" --record-update --update-commit \"$installed\" --update-repo \"$repo\" || status=$?; fi\n")
-	b.WriteString("finish() {\n")
-	b.WriteString("  code=$status\n")
-	b.WriteString("  if [ \"$restore_ref\" != HEAD ]; then git checkout \"$restore_ref\" >/dev/null 2>&1 || code=1; fi\n")
-	b.WriteString("  if [ \"$code\" -eq 0 ]; then printf '\\nticky update complete: %s\\n' \"$installed\"; else printf '\\nticky update failed (exit %s). Review the output above.\\n' \"$code\"; fi\n")
-	b.WriteString("  printf 'Press Enter to close...'; read _ || true\n")
-	b.WriteString("  exit \"$code\"\n")
-	b.WriteString("}\n")
-	b.WriteString("finish\n")
+	b.WriteString("if [ \"$status\" -eq 0 ]; then work=$(mktemp -d \"${TMPDIR:-/tmp}/ticky-update.XXXXXX\") || status=$?; fi\n")
+	b.WriteString("if [ \"$status\" -eq 0 ]; then rmdir \"$work\"; git -C \"$repo\" worktree add --detach \"$work\" \"$target\" >>\"$log\" 2>&1 || status=$?; fi\n")
+	b.WriteString("if [ \"$status\" -eq 0 ]; then (cd \"$work\" && make install UPDATE=1 BUILD_DIR=\"$work/build\") >>\"$log\" 2>&1 || status=$?; fi\n")
+	b.WriteString("installed=$(git -C \"${work:-$repo}\" rev-parse HEAD 2>/dev/null || printf unknown)\n")
+	b.WriteString("if [ \"$status\" -eq 0 ] && [ -n \"$recorder\" ] && [ -x \"$recorder\" ]; then \"$recorder\" --record-update --update-commit \"$installed\" --update-repo \"$repo\" >>\"$log\" 2>&1 || status=$?; fi\n")
+	b.WriteString("if [ -n \"$work\" ]; then git -C \"$repo\" worktree remove --force \"$work\" >>\"$log\" 2>&1 || status=$?; fi\n")
+	b.WriteString("printf '\\n--- updater output ---\\n'; cat \"$log\"\n")
+	b.WriteString("if [ \"$status\" -eq 0 ]; then printf '\\nticky update complete: %s\\n' \"$installed\"; else printf '\\nticky update failed (exit %s). Log: %s\\n' \"$status\" \"$log\"; fi\n")
+	b.WriteString("printf 'Press Enter to close...'; read _ || true\n")
+	b.WriteString("exit \"$status\"\n")
 	if err := os.WriteFile(path, b.Bytes(), 0755); err != nil {
 		return "", err
 	}
@@ -297,40 +298,43 @@ func writeWindowsScript(req InstallRequest) (string, error) {
 	}
 	content := fmt.Sprintf(`$ErrorActionPreference = 'Continue'
 $repo = %s
- $target = %s
- $recorder = %s
- $latest = %s
- $status = 0
- $prevRef = 'HEAD'
- try { Set-Location -LiteralPath $repo } catch { Write-Host "Could not open update repository: $repo"; $status = 1 }
- if ($status -eq 0) {
-     $prevRef = (git rev-parse --abbrev-ref HEAD).Trim()
-     if ($LASTEXITCODE -ne 0) { $status = $LASTEXITCODE; $prevRef = 'HEAD' }
- }
-if ($status -eq 0) { git fetch --prune --all }
+$target = %s
+$recorder = %s
+$latest = %s
+$status = 0
+$log = Join-Path ([System.IO.Path]::GetTempPath()) ('ticky-update-' + [guid]::NewGuid().ToString() + '.log')
+$work = $null
+$prevRef = (git -C $repo rev-parse --abbrev-ref HEAD 2>$null).Trim()
+if (-not $prevRef) { $prevRef = 'HEAD' }
+"ticky update started" | Tee-Object -FilePath $log
+git -C $repo fetch --prune --all *>> $log
 if ($LASTEXITCODE -ne 0) { $status = $LASTEXITCODE }
-if ($latest) {
-    if ($status -eq 0 -and $prevRef -ne 'HEAD') {
-        git rev-parse --abbrev-ref --symbolic-full-name '@{u}' *> $null
-        if ($LASTEXITCODE -eq 0) { git pull --ff-only } else { git merge --ff-only "origin/$prevRef" }
-        if ($LASTEXITCODE -ne 0) { $status = $LASTEXITCODE }
-    } elseif ($status -eq 0 -and $target) {
-        git checkout --detach $target
-        if ($LASTEXITCODE -ne 0) { $status = $LASTEXITCODE }
+if ($status -eq 0) {
+    if ($latest -and $prevRef -ne 'HEAD') {
+        $upstream = (git -C $repo rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>$null).Trim()
+        if (-not $upstream) { $upstream = "origin/$prevRef" }
+        $target = (git -C $repo rev-parse $upstream 2>> $log).Trim()
     }
-} elseif ($status -eq 0) {
-    git checkout --detach $target
+    if (-not $target) { $status = 1; 'Could not resolve the update target.' | Add-Content $log }
+}
+if ($status -eq 0) {
+    $work = Join-Path ([System.IO.Path]::GetTempPath()) ('ticky-update-' + [guid]::NewGuid().ToString())
+    git -C $repo worktree add --detach $work $target *>> $log
     if ($LASTEXITCODE -ne 0) { $status = $LASTEXITCODE }
 }
 if ($status -eq 0) {
-    & .\install.ps1 -Update
+    Push-Location $work
+    & .\install.ps1 -Update -BuildDirOverride (Join-Path $work 'build') *>> $log
     if ($LASTEXITCODE -ne 0) { $status = $LASTEXITCODE }
+    Pop-Location
 }
-$installed = (git rev-parse HEAD).Trim()
-if ($status -eq 0 -and $recorder -and (Test-Path $recorder)) { & $recorder --record-update --update-commit $installed --update-repo $repo; if ($LASTEXITCODE -ne 0) { $status = $LASTEXITCODE } }
-if ($prevRef -ne 'HEAD') { git checkout $prevRef | Out-Null; if ($LASTEXITCODE -ne 0) { $status = 1 } }
+$installed = if ($work) { (git -C $work rev-parse HEAD).Trim() } else { 'unknown' }
+if ($status -eq 0 -and $recorder -and (Test-Path $recorder)) { & $recorder --record-update --update-commit $installed --update-repo $repo *>> $log; if ($LASTEXITCODE -ne 0) { $status = $LASTEXITCODE } }
+if ($work) { git -C $repo worktree remove --force $work *>> $log; if ($LASTEXITCODE -ne 0) { $status = 1 } }
 Write-Host ""
-if ($status -eq 0) { Write-Host "ticky update complete: $installed" -ForegroundColor Green } else { Write-Host "ticky update failed (exit $status). Review the output above." -ForegroundColor Red }
+Write-Host "--- updater output ---"
+Get-Content $log
+if ($status -eq 0) { Write-Host "ticky update complete: $installed" -ForegroundColor Green } else { Write-Host "ticky update failed (exit $status). Log: $log" -ForegroundColor Red }
 Read-Host 'Press Enter to close'
 `, psQuote(req.RepoPath), psQuote(req.TargetCommit), psQuote(req.RecorderBinary), latest)
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
@@ -341,6 +345,10 @@ Read-Host 'Press Enter to close'
 
 func terminalCommand(preferred string, script string) (string, []string, error) {
 	if preferred != "" {
+		name := filepath.Base(preferred)
+		if name == "konsole" || name == "konsole.exe" {
+			return preferred, []string{"--hold", "-e", script}, nil
+		}
 		return preferred, []string{"-e", script}, nil
 	}
 	candidates := []struct {
@@ -349,12 +357,12 @@ func terminalCommand(preferred string, script string) (string, []string, error) 
 	}{
 		{"x-terminal-emulator", []string{"-e", script}},
 		{"gnome-terminal", []string{"--", script}},
-		{"konsole", []string{"-e", script}},
-		{"xfce4-terminal", []string{"-e", script}},
-		{"alacritty", []string{"-e", script}},
-		{"kitty", []string{script}},
+		{"konsole", []string{"--hold", "-e", script}},
+		{"xfce4-terminal", []string{"--hold", "-e", script}},
+		{"alacritty", []string{"--hold", "-e", script}},
+		{"kitty", []string{"--hold", script}},
 		{"wezterm", []string{"start", "--", script}},
-		{"foot", []string{script}},
+		{"foot", []string{"-e", script}},
 	}
 	for _, c := range candidates {
 		if _, err := exec.LookPath(c.name); err == nil {

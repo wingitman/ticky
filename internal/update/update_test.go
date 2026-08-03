@@ -45,7 +45,9 @@ func TestWriteUnixScriptKeepsFailureVisible(t *testing.T) {
 		"ticky update failed",
 		"Press Enter to close",
 		"make install UPDATE=1",
-		"git checkout \"$restore_ref\"",
+		"worktree add --detach",
+		"BUILD_DIR=\"$work/build\"",
+		"updater output",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("generated script does not contain %q", want)
@@ -63,7 +65,7 @@ func TestWriteWindowsScriptKeepsFailureVisible(t *testing.T) {
 		t.Fatal(err)
 	}
 	script := string(content)
-	for _, want := range []string{"$ErrorActionPreference = 'Continue'", "ticky update failed", "Read-Host 'Press Enter to close'"} {
+	for _, want := range []string{"$ErrorActionPreference = 'Continue'", "worktree add --detach", "BuildDirOverride", "ticky update failed", "Read-Host 'Press Enter to close'"} {
 		if !strings.Contains(script, want) {
 			t.Errorf("generated PowerShell script does not contain %q", want)
 		}
