@@ -1,6 +1,10 @@
 package ui
 
-import "charm.land/lipgloss/v2"
+import (
+	"image/color"
+
+	"charm.land/lipgloss/v2"
+)
 
 // Colour palette — all colours defined once and referenced by style vars.
 var (
@@ -168,3 +172,93 @@ var StyleProgressEmpty = lipgloss.NewStyle().
 // StyleDivider renders horizontal rule lines.
 var StyleDivider = lipgloss.NewStyle().
 	Foreground(colorSubtle)
+
+// StyleSelector renders the active theme-picker row marker.
+var StyleSelector = lipgloss.NewStyle().
+	Foreground(lipgloss.Color("#FFFFFF")).
+	Bold(true)
+
+// ConfigureTheme applies a complete semantic palette. Terminal mode omits
+// explicit colors so the terminal's normal foreground and background inherit.
+func ConfigureTheme(colors map[string]string, terminal bool) {
+	colorPrimary = themedColor(colors, terminal, "primary", "#7C9EF0")
+	colorAccent = themedColor(colors, terminal, "accent", "#F0A47C")
+	colorGreen = themedColor(colors, terminal, "success", "#7CF09C")
+	colorRed = themedColor(colors, terminal, "error", "#F07C7C")
+	colorMuted = themedColor(colors, terminal, "muted", "#666688")
+	colorSubtle = themedColor(colors, terminal, "border", "#444466")
+	colorSelected = themedColor(colors, terminal, "selected_background", "#1E1E3A")
+	colorBreak = themedColor(colors, terminal, "accent", "#A47CF0")
+	colorHeader = themedColor(colors, terminal, "selected_foreground", "#EEEEFF")
+	colorWarning = themedColor(colors, terminal, "clipboard", "#F0D07C")
+	colorBrand = themedColor(colors, terminal, "brand_secondary", "#5865F2")
+
+	BrandDelby = themedStyle(lipgloss.NewStyle().Bold(true), colors, terminal, "brand_primary", "#FFFFFF")
+	BrandSoft = themedStyle(lipgloss.NewStyle().Bold(true), colors, terminal, "brand_secondary", "#5865F2")
+	StyleHeader = themedStyle(lipgloss.NewStyle().Bold(true), colors, terminal, "primary", "#7C9EF0")
+	StyleSubHeader = themedStyle(lipgloss.NewStyle().Bold(true), colors, terminal, "accent", "#F0A47C")
+	StyleMuted = themedStyle(lipgloss.NewStyle(), colors, terminal, "muted", "#666688")
+	StyleSubtle = themedStyle(lipgloss.NewStyle(), colors, terminal, "border", "#444466")
+	StyleError = themedStyle(lipgloss.NewStyle().Bold(true), colors, terminal, "error", "#F07C7C")
+	StyleSuccess = themedStyle(lipgloss.NewStyle().Bold(true), colors, terminal, "success", "#7CF09C")
+	StyleWarning = themedStyle(lipgloss.NewStyle().Bold(true), colors, terminal, "clipboard", "#F0D07C")
+	StyleSelected = themedBackground(themedStyle(lipgloss.NewStyle().Bold(true), colors, terminal, "selected_foreground", "#EEEEFF"), colors, terminal, "selected_background", "#1E1E3A")
+	StyleCompleted = themedStyle(lipgloss.NewStyle(), colors, terminal, "muted", "#666688")
+	StyleAbandoned = themedStyle(lipgloss.NewStyle(), colors, terminal, "border", "#444466")
+	StyleGroupName = themedStyle(lipgloss.NewStyle().Bold(true), colors, terminal, "accent", "#F0A47C")
+	StyleTimerFocus = themedStyle(lipgloss.NewStyle().Bold(true), colors, terminal, "primary", "#7C9EF0")
+	StyleTimerBreak = themedStyle(lipgloss.NewStyle().Bold(true), colors, terminal, "accent", "#A47CF0")
+	StyleTimerPaused = themedStyle(lipgloss.NewStyle().Bold(true), colors, terminal, "clipboard", "#F0D07C")
+	StyleTimerLabel = themedStyle(lipgloss.NewStyle().Bold(true), colors, terminal, "muted", "#666688")
+	StyleBox = themedBorder(lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(1, 3).Margin(1, 0), colors, terminal, "accent", "#F0A47C")
+	StyleBreakBox = themedBorder(lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(1, 3).Margin(1, 0), colors, terminal, "accent", "#A47CF0")
+	StyleErrorBox = themedBorder(lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(1, 3).Margin(1, 0), colors, terminal, "error", "#F07C7C")
+	StyleStatusBar = themedStyle(lipgloss.NewStyle(), colors, terminal, "muted", "#666688")
+	StyleStatusKey = themedStyle(lipgloss.NewStyle(), colors, terminal, "primary", "#7C9EF0")
+	StyleReportHeader = themedStyle(lipgloss.NewStyle().Bold(true), colors, terminal, "primary", "#7C9EF0")
+	StyleOverrun = themedStyle(lipgloss.NewStyle(), colors, terminal, "error", "#F07C7C")
+	StyleOnTime = themedStyle(lipgloss.NewStyle(), colors, terminal, "success", "#7CF09C")
+	StyleInterruptLabel = themedStyle(lipgloss.NewStyle().Bold(true), colors, terminal, "clipboard", "#F0D07C")
+	StyleProgressFull = themedStyle(lipgloss.NewStyle(), colors, terminal, "primary", "#7C9EF0")
+	StyleProgressEmpty = themedStyle(lipgloss.NewStyle(), colors, terminal, "border", "#444466")
+	StyleDivider = themedStyle(lipgloss.NewStyle(), colors, terminal, "border", "#444466")
+	StyleSelector = themedStyle(lipgloss.NewStyle().Bold(true), colors, terminal, "selector", "#FFFFFF")
+}
+
+func themedColor(colors map[string]string, terminal bool, key, fallback string) color.Color {
+	if value, ok := themedValue(colors, terminal, key, fallback); ok {
+		return lipgloss.Color(value)
+	}
+	return nil
+}
+
+func themedStyle(style lipgloss.Style, colors map[string]string, terminal bool, key, fallback string) lipgloss.Style {
+	if value, ok := themedValue(colors, terminal, key, fallback); ok {
+		return style.Foreground(lipgloss.Color(value))
+	}
+	return style
+}
+
+func themedBackground(style lipgloss.Style, colors map[string]string, terminal bool, key, fallback string) lipgloss.Style {
+	if value, ok := themedValue(colors, terminal, key, fallback); ok {
+		return style.Background(lipgloss.Color(value))
+	}
+	return style
+}
+
+func themedBorder(style lipgloss.Style, colors map[string]string, terminal bool, key, fallback string) lipgloss.Style {
+	if value, ok := themedValue(colors, terminal, key, fallback); ok {
+		return style.BorderForeground(lipgloss.Color(value))
+	}
+	return style
+}
+
+func themedValue(colors map[string]string, terminal bool, key, fallback string) (string, bool) {
+	if value := colors[key]; value != "" {
+		return value, true
+	}
+	if terminal {
+		return "", false
+	}
+	return fallback, fallback != ""
+}

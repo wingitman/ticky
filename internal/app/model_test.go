@@ -90,7 +90,9 @@ func TestGroupCompletionCyclesSuggestionsAndOriginalQuery(t *testing.T) {
 }
 
 func TestStatusBarStaysWithinWidth(t *testing.T) {
-	m := New(config.Default(), &storage.Store{}, &session.Session{}, false)
+	cfg := config.Default()
+	cfg.Themes.ThemeName = "ocean"
+	m := New(cfg, &storage.Store{}, &session.Session{}, false)
 	m.width = 24
 	bar := m.renderStatusBar([]string{"up/down navigate", "enter start", "q quit"})
 	if lipgloss.Width(bar) > m.width {

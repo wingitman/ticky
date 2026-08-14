@@ -32,6 +32,7 @@ var keybindEntries = []struct{ key, comment string }{
 	{"report", "open report view"},
 	{"completed", "view completed tasks"},
 	{"show_updates", "show update history and installers"},
+	{"theme", "open theme picker"},
 }
 
 // displayEntries is the authoritative list of every display TOML key used for
@@ -56,6 +57,8 @@ var updateEntries = []string{
 	"terminal",
 }
 
+var themeEntries = []string{"theme_name", "theme_file"}
+
 // Keybinds holds all configurable key bindings.
 type Keybinds struct {
 	Up          string `toml:"up"`
@@ -76,6 +79,7 @@ type Keybinds struct {
 	ShowUpdates string `toml:"show_updates"`
 	Increase    string `toml:"increase"`
 	Decrease    string `toml:"decrease"`
+	Theme       string `toml:"theme"`
 }
 
 // Updates holds update-check and installer preferences.
@@ -131,6 +135,7 @@ type Config struct {
 	Keybinds Keybinds `toml:"keybinds"`
 	Display  Display  `toml:"display"`
 	Updates  Updates  `toml:"updates"`
+	Themes   Themes   `toml:"themes"`
 }
 
 // Default returns a Config populated with sensible defaults.
@@ -155,6 +160,7 @@ func Default() *Config {
 			ShowUpdates: "U",
 			Increase:    "right",
 			Decrease:    "left",
+			Theme:       "T",
 		},
 		Display: Display{
 			TimeFormat:              "minutes",
@@ -172,6 +178,10 @@ func Default() *Config {
 			CurrentCommit: "",
 			RepoPath:      "",
 			Terminal:      "",
+		},
+		Themes: Themes{
+			ThemeName: "terminal",
+			ThemeFile: defaultThemeFile(),
 		},
 	}
 }
@@ -218,6 +228,7 @@ func Load() (*Config, error) {
 		if err := WriteDefault(path); err != nil {
 			return cfg, err
 		}
+		_ = EnsureThemesFile(cfg)
 		return cfg, nil
 	}
 	if err != nil {
@@ -243,6 +254,12 @@ func Load() (*Config, error) {
 	if cfg.Display.BreakPromptDebounce < 0 {
 		cfg.Display.BreakPromptDebounce = 0
 	}
+	if cfg.Themes.ThemeName == "" {
+		cfg.Themes.ThemeName = "terminal"
+	}
+	if cfg.Themes.ThemeFile == "" {
+		cfg.Themes.ThemeFile = defaultThemeFile()
+	}
 
 	// Migration: if the file is missing any known key, rewrite it in full so
 	// the user can see and edit the new entries. User values are preserved
@@ -250,6 +267,7 @@ func Load() (*Config, error) {
 	if needsMigration(path) {
 		_ = writeMigrated(path, cfg) // non-fatal
 	}
+	_ = EnsureThemesFile(cfg)
 
 	return cfg, nil
 }
@@ -313,6 +331,9 @@ func applyKeybindDefaults(cfg *Config) {
 	if cfg.Keybinds.ShowUpdates == "" {
 		cfg.Keybinds.ShowUpdates = d.ShowUpdates
 	}
+	if cfg.Keybinds.Theme == "" {
+		cfg.Keybinds.Theme = d.Theme
+	}
 }
 
 // needsMigration returns true if the config file is missing any known keybind
@@ -339,6 +360,11 @@ func needsMigration(path string) bool {
 			return true
 		}
 	}
+	for _, key := range themeEntries {
+		if !fileContainsKeyInSection(content, "themes", key) {
+			return true
+		}
+	}
 	return false
 }
 
@@ -355,6 +381,22 @@ func fileContainsKey(content, key string) bool {
 		}
 		// Match "key = " or "key=" at the start of the trimmed line.
 		if strings.HasPrefix(trimmed, key+"=") || strings.HasPrefix(trimmed, key+" ") {
+			return true
+		}
+	}
+	return false
+}
+
+func fileContainsKeyInSection(content, section, key string) bool {
+	inSection := false
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			inSection = trimmed == "["+section+"]"
+			continue
+		}
+		if inSection && !strings.HasPrefix(trimmed, "#") &&
+			(strings.HasPrefix(trimmed, key+"=") || strings.HasPrefix(trimmed, key+" ")) {
 			return true
 		}
 	}
@@ -413,7 +455,24 @@ func migratedTOML(cfg *Config) string {
 		"disable_checks = " + boolStr(u.DisableChecks) + "   # true disables startup update checks\n" +
 		"current_commit = " + quote(u.CurrentCommit) + "   # installed app commit, maintained by ticky\n" +
 		"repo_path = " + quote(u.RepoPath) + "   # source checkout used for updates\n" +
-		"terminal = " + quote(u.Terminal) + "   # optional terminal command for detached updates\n"
+		"terminal = " + quote(u.Terminal) + "   # optional terminal command for detached updates\n\n" +
+		"[themes]\n" +
+		"theme_name = " + quote(cfg.Themes.ThemeName) + "   # terminal, or a named theme from theme_file\n" +
+		"theme_file = " + quote(cfg.Themes.ThemeFile) + "   # shared Delbysoft theme file\n" +
+		"# Optional overrides applied after the selected theme.\n" +
+		"# primary = \"#7C9EF0\"\n" +
+		"# accent = \"#F0A47C\"\n" +
+		"# muted = \"#666688\"\n" +
+		"# error = \"#F07C7C\"\n" +
+		"# success = \"#7CF09C\"\n" +
+		"# border = \"#444466\"\n" +
+		"# selected_background = \"#1E1E3A\"\n" +
+		"# selected_foreground = \"#EEEEFF\"\n" +
+		"# header_background = \"#1A1A2E\"\n" +
+		"# hint_key = \"#FFE66D\"\n" +
+		"# brand_primary = \"#FFFFFF\"\n" +
+		"# brand_secondary = \"#5865F2\"\n" +
+		"# selector = \"#FFFFFF\"\n"
 	return out
 }
 
@@ -462,6 +521,7 @@ func keybindValues(k *Keybinds) map[string]string {
 		"report":       k.Report,
 		"completed":    k.Completed,
 		"show_updates": k.ShowUpdates,
+		"theme":        k.Theme,
 	}
 }
 

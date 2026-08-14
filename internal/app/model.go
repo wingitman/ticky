@@ -17,6 +17,7 @@ import (
 	"github.com/wingitman/ticky/internal/session"
 	"github.com/wingitman/ticky/internal/storage"
 	"github.com/wingitman/ticky/internal/timer"
+	"github.com/wingitman/ticky/internal/ui"
 	appupdate "github.com/wingitman/ticky/internal/update"
 	"github.com/wingitman/ticky/internal/version"
 )
@@ -42,6 +43,7 @@ const (
 	ModeUpdates                  // update history/install screen
 	ModeError                    // unrecoverable error overlay
 	ModeDeletePrompt             // confirmation before deleting a task
+	ModeTheme                   // shared theme picker
 )
 
 // editField indexes which field is focused in the task edit form.
@@ -84,6 +86,7 @@ type resolvedKeys struct {
 	updates   string
 	increase  string
 	decrease  string
+	theme     string
 }
 
 func resolveKeys(k config.Keybinds) resolvedKeys {
@@ -106,6 +109,7 @@ func resolveKeys(k config.Keybinds) resolvedKeys {
 		updates:   k.ShowUpdates,
 		increase:  k.Increase,
 		decrease:  k.Decrease,
+		theme:     k.Theme,
 	}
 }
 
@@ -127,6 +131,10 @@ type Model struct {
 
 	// Mode / screen
 	mode Mode
+
+	// Theme picker state
+	themeCursor int
+	themeNames  []string
 
 	// Task list state
 	cursor int
@@ -205,6 +213,7 @@ var timeFormats = []string{"minutes", "seconds", "hhmm", "tshirt", "points"}
 
 // New constructs a ready-to-use Model.
 func New(cfg *config.Config, store *storage.Store, sess *session.Session, startupUpdateChecks bool) Model {
+	applyTheme(cfg)
 	fmtIdx := 0
 	for i, f := range timeFormats {
 		if f == cfg.Display.TimeFormat {
@@ -228,6 +237,8 @@ func New(cfg *config.Config, store *storage.Store, sess *session.Session, startu
 	pauseInput.Placeholder = "Reason for pausing…"
 	pauseInput.CharLimit = 200
 
+	themeNames, _ := config.ThemeNames(cfg)
+
 	m := Model{
 		cfg:                 cfg,
 		store:               store,
@@ -240,6 +251,7 @@ func New(cfg *config.Config, store *storage.Store, sess *session.Session, startu
 		timeFormatIdx:       fmtIdx,
 		startupUpdateChecks: startupUpdateChecks,
 		updateExpanded:      map[string]bool{},
+		themeNames:          themeNames,
 	}
 
 	if session.IsActive(sess) {
@@ -397,6 +409,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.cfg = msg.cfg
 		m.keys = resolveKeys(msg.cfg.Keybinds)
+		applyTheme(msg.cfg)
+		m.themeNames, _ = config.ThemeNames(msg.cfg)
 		m.timeFormatIdx = 0
 		for i, format := range timeFormats {
 			if format == msg.cfg.Display.TimeFormat {
@@ -440,6 +454,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateUpdatePrompt(key)
 		case ModeUpdates:
 			return m.updateUpdates(key)
+		case ModeTheme:
+			return m.updateTheme(key)
 		case ModeError:
 			m.mode = ModeTaskList
 			m.errorMsg = ""
@@ -756,6 +772,61 @@ func (m Model) handleAutoStartBreak() (tea.Model, tea.Cmd) {
 
 // ─── ModeTaskList ─────────────────────────────────────────────────────────────
 
+func applyTheme(cfg *config.Config) {
+	theme := config.ResolveTheme(cfg)
+	ui.ConfigureTheme(theme.Colors, theme.Terminal)
+}
+
+func (m Model) applySelectedTheme() (tea.Model, tea.Cmd) {
+	if m.themeCursor < 0 || m.themeCursor >= len(m.themeNames) {
+		m.mode = ModeTaskList
+		return m, nil
+	}
+	name := m.themeNames[m.themeCursor]
+	if err := config.SetThemeName(name); err != nil {
+		m.mode = ModeError
+		m.errorMsg = "Could not save theme: " + err.Error()
+		return m, nil
+	}
+	m.cfg.Themes.ThemeName = name
+	applyTheme(m.cfg)
+	m.mode = ModeTaskList
+	m.statusMsg = "theme: " + name
+	return m, clearStatusCmd()
+}
+
+func (m *Model) clampThemeCursor() {
+	if len(m.themeNames) == 0 {
+		m.themeCursor = 0
+		return
+	}
+	if m.themeCursor < 0 {
+		m.themeCursor = 0
+	}
+	if m.themeCursor >= len(m.themeNames) {
+		m.themeCursor = len(m.themeNames) - 1
+	}
+}
+
+func (m Model) updateTheme(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "esc", m.keys.close, m.keys.updates:
+		m.mode = ModeTaskList
+		return m, nil
+	case m.keys.up:
+		m.themeCursor--
+		m.clampThemeCursor()
+		return m, nil
+	case m.keys.down:
+		m.themeCursor++
+		m.clampThemeCursor()
+		return m, nil
+	case m.keys.confirm:
+		return m.applySelectedTheme()
+	}
+	return m, nil
+}
+
 func (m Model) updateTaskList(key string) (tea.Model, tea.Cmd) {
 	tasks := m.taskListTasks()
 
@@ -898,6 +969,18 @@ func (m Model) updateTaskList(key string) (tea.Model, tea.Cmd) {
 
 	case matchKey(key, m.keys.options):
 		return m, openConfigCmd()
+
+	case matchKey(key, m.keys.theme):
+		m.themeNames, _ = config.ThemeNames(m.cfg)
+		m.themeCursor = 0
+		for i, name := range m.themeNames {
+			if name == m.cfg.Themes.ThemeName {
+				m.themeCursor = i
+				break
+			}
+		}
+		m.mode = ModeTheme
+		return m, nil
 
 	case key == "ctrl+p":
 		return m, launchDesktopCmd()
