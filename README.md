@@ -39,7 +39,11 @@ Built with [Bubble Tea v2](https://github.com/charmbracelet/bubbletea) and [Lip 
 
 ### Windows
 
-No `make` or Unix tools required — only [Go](https://go.dev/dl/).
+No `make` or Unix tools required. Go is optional when
+`releases\windows\ticky.exe` is present. Use either shell; both run the same
+`ticky --install` step.
+
+**PowerShell**
 
 ```powershell
 git clone https://github.com/wingitman/ticky.git
@@ -47,9 +51,24 @@ cd ticky
 .\install.ps1
 ```
 
-This builds the binary, installs it to `%LOCALAPPDATA%\Programs\ticky\`, adds that directory to your user PATH via the registry (no admin required), and automatically sets up the shell prompt integration for your active prompt system (starship or PowerShell `$PROFILE`).
+**Command Prompt** (for machines where PowerShell is blocked by policy)
 
-> **Execution policy:** if you get a script-blocked error, run this once:
+```bat
+git clone https://github.com/wingitman/ticky.git
+cd ticky
+install.cmd
+```
+
+Both build the binary (or use the pre-built one), install it to
+`%LOCALAPPDATA%\Programs\ticky\`, and add that directory to your user PATH via
+the registry (no admin required). `install.ps1` also adds the prompt
+integration to your PowerShell `$PROFILE`. Command Prompt's `PROMPT` cannot run
+commands, so there is no live prompt status there; use `ticky --status` or
+`ticky --check` instead. When a focus session ends, ticky opens in a new console
+window (or shows a message box if it cannot).
+
+> **Execution policy:** if `install.ps1` is blocked, either run this once or use
+> `install.cmd`:
 > ```powershell
 > Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 > ```
@@ -91,7 +110,14 @@ Then reload your shell (`source ~/.bashrc`, `exec zsh`, `source ~/.config/fish/c
 .\uninstall.ps1
 ```
 
-Removes the binary, removes it from your user PATH, and removes the ticky prompt integration from your starship config or PowerShell `$PROFILE`.
+or, from Command Prompt:
+
+```bat
+uninstall.cmd
+```
+
+Removes the install folder, removes it from your user PATH, and removes the
+ticky prompt integration from your PowerShell `$PROFILE`.
 
 Your config and task data are left in place — delete `%APPDATA%\Roaming\delbysoft\` manually if you want a full clean uninstall.
 
@@ -366,7 +392,7 @@ The config file is created automatically on first launch. Press `o` inside ticky
 |----|------|
 | Linux | `~/.config/delbysoft/ticky.toml` |
 | macOS | `~/Library/Application Support/delbysoft/ticky.toml` |
-| Windows | `%APPDATA%\Roaming\delbysoft\ticky.toml` |
+| Windows | `%APPDATA%\delbysoft\ticky.toml` |
 
 Task data is stored as `tasks.toml` in the same directory.
 
@@ -420,6 +446,7 @@ disable_checks = false  # true disables startup update checks
 current_commit = ""     # installed app commit, maintained by ticky
 repo_path = ""          # source checkout used for updates
 terminal = ""           # optional terminal command for detached updates
+windows_shell = "auto"  # Windows updater shell: auto | powershell | cmd
 ```
 
 ### Updates
@@ -466,6 +493,18 @@ go build -ldflags='-s -w' -o bin\ticky.exe .   # build only
 .\install.ps1 --build-all                        # equivalent flag spelling
 .\uninstall.ps1                                  # uninstall
 ```
+
+### Windows (Command Prompt)
+
+```bat
+go build -ldflags="-s -w" -o bin\ticky.exe .   &rem build only
+install.cmd                                     &rem build + install
+uninstall.cmd                                   &rem uninstall
+```
+
+The installers are thin wrappers around `ticky --install [--update]
+[--from <exe>] [--desktop-from <exe>] [--dir <dir>] [--powershell-profile <path>]`
+and `ticky --uninstall`.
 
 ### Cross-compile
 

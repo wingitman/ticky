@@ -43,7 +43,7 @@ const (
 	ModeUpdates                  // update history/install screen
 	ModeError                    // unrecoverable error overlay
 	ModeDeletePrompt             // confirmation before deleting a task
-	ModeTheme                   // shared theme picker
+	ModeTheme                    // shared theme picker
 )
 
 // editField indexes which field is focused in the task edit form.
@@ -1922,9 +1922,10 @@ func (m Model) launchUpdate(latest bool, targetCommit string) tea.Cmd {
 		repoPath = m.cfg.Updates.RepoPath
 	}
 	recorder, _ := os.Executable()
-	terminal := ""
+	terminal, windowsShell := "", ""
 	if m.cfg != nil {
 		terminal = m.cfg.Updates.Terminal
+		windowsShell = m.cfg.Updates.WindowsShell
 	}
 	req := appupdate.InstallRequest{
 		RepoPath:       repoPath,
@@ -1932,6 +1933,7 @@ func (m Model) launchUpdate(latest bool, targetCommit string) tea.Cmd {
 		Latest:         latest,
 		Terminal:       terminal,
 		RecorderBinary: recorder,
+		WindowsShell:   windowsShell,
 	}
 	return func() tea.Msg {
 		if err := appupdate.LaunchDetached(req); err != nil {
@@ -2014,15 +2016,11 @@ func launchWatcherCmd(sess *session.Session) tea.Cmd {
 		if self == "" {
 			return nil
 		}
-		cmd := exec.Command(self, "--watch")
-		cmd.Stdin = nil
-		cmd.Stdout = nil
-		cmd.Stderr = nil
-		setSysProcAttr(cmd)
-		if err := cmd.Start(); err != nil {
+		pid, err := startWatcherProcess(self)
+		if err != nil {
 			return nil
 		}
-		sess.WatchPID = cmd.Process.Pid
+		sess.WatchPID = pid
 		_ = session.Save(sess)
 		return nil
 	}

@@ -11,6 +11,15 @@ Ticky follows Bubble Tea's model-update-view loop.
 - `internal/app` coordinates screens and commands. Rendering should consume
   view projections and never reorder the persisted store.
 - `internal/ui` is the delbysoft visual language shared by screens.
+- `internal/install` implements `ticky --install` / `--uninstall` for Windows
+  (copy, running-exe replacement, user PATH, prompt integration). `install.cmd`
+  and `install.ps1` are thin wrappers so Command Prompt and PowerShell installs
+  behave the same.
+- `internal/update` generates the detached updater script. On Windows
+  `windows_shell = "auto"` probes PowerShell (must run an unsigned script in
+  FullLanguage mode) and falls back to a Command Prompt script.
+- `internal/fsutil` provides atomic file writes used by config, storage, and
+  session persistence.
 - `internal/desktop` is an optional Ebiten frontend. It runs as a separate
   `ticky-desktop` process and uses the same storage/session files as the TUI.
 

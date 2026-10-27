@@ -46,10 +46,17 @@ func resolveSelf() string {
 	return path
 }
 
-// setSysProcAttr configures the command to run in its own process group so it
+// startWatcherProcess launches `ticky --watch` in its own process group so it
 // is not killed when the parent ticky process exits.
-func setSysProcAttr(cmd *exec.Cmd) {
+func startWatcherProcess(self string) (int, error) {
+	cmd := exec.Command(self, "--watch")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		return 0, err
+	}
+	pid := cmd.Process.Pid
+	_ = cmd.Process.Release()
+	return pid, nil
 }
 
 func setDetachedProcAttr(cmd *exec.Cmd) {

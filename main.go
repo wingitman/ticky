@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -10,6 +12,7 @@ import (
 	"github.com/wingitman/ticky/internal/app"
 	"github.com/wingitman/ticky/internal/config"
 	"github.com/wingitman/ticky/internal/desktop"
+	"github.com/wingitman/ticky/internal/install"
 	"github.com/wingitman/ticky/internal/overlay"
 	"github.com/wingitman/ticky/internal/session"
 	"github.com/wingitman/ticky/internal/storage"
@@ -27,6 +30,28 @@ func main() {
 	}
 
 	switch {
+	case hasFlag(args, "--install"):
+		cleanupOldBinaries()
+		opts := install.Options{
+			From:              flagValue(args, "--from"),
+			DesktopFrom:       flagValue(args, "--desktop-from"),
+			Dir:               flagValue(args, "--dir"),
+			Update:            hasFlag(args, "--update"),
+			PowerShellProfile: flagValue(args, "--powershell-profile"),
+		}
+		if err := install.Install(opts); err != nil {
+			fmt.Fprintf(os.Stderr, "ticky install: %v\n", err)
+			os.Exit(1)
+		}
+		return
+
+	case hasFlag(args, "--uninstall"):
+		if err := install.Uninstall(install.Options{Dir: flagValue(args, "--dir")}); err != nil {
+			fmt.Fprintf(os.Stderr, "ticky uninstall: %v\n", err)
+			os.Exit(1)
+		}
+		return
+
 	case hasFlag(args, "--desktop"):
 		if err := desktop.Run(); err != nil {
 			fmt.Fprintf(os.Stderr, "ticky desktop: %v\n", err)
@@ -52,6 +77,7 @@ func main() {
 // ─── Normal TUI ───────────────────────────────────────────────────────────────
 
 func runTUI(ttyPath string) {
+	cleanupOldBinaries()
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ticky: config warning: %v\n", err)
@@ -248,6 +274,18 @@ func runCheck() {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+// cleanupOldBinaries removes executables that a Windows install or update
+// moved aside because they were running at the time.
+func cleanupOldBinaries() {
+	if runtime.GOOS != "windows" {
+		return
+	}
+	if exe, err := os.Executable(); err == nil {
+		install.CleanupOld(exe)
+		install.CleanupOld(filepath.Join(filepath.Dir(exe), "ticky-desktop.exe"))
+	}
+}
 
 func hasFlag(args []string, flag string) bool {
 	for _, a := range args {

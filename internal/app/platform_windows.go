@@ -8,6 +8,7 @@ import (
 	"syscall"
 
 	"github.com/wingitman/ticky/internal/session"
+	"golang.org/x/sys/windows"
 )
 
 // EnvSnapshot holds environment variables captured at task-start time.
@@ -37,14 +38,34 @@ func resolveSelf() string {
 	return path
 }
 
-// setSysProcAttr is a no-op on Windows; the CREATE_NEW_PROCESS_GROUP flag
-// would be set here for full detachment, but basic Start() is sufficient
-// for our watcher use case.
-func setSysProcAttr(cmd *exec.Cmd) {}
+// startWatcherProcess launches `ticky --watch` fully detached from the
+// current console so it survives the Command Prompt or PowerShell window
+// closing. Breaking away from the parent's job object keeps it alive when the
+// console host (or Windows Terminal) tears its job down; some managed
+// environments forbid breakaway, so the launch is retried without it.
+func startWatcherProcess(self string) (int, error) {
+	base := uint32(windows.DETACHED_PROCESS | windows.CREATE_NEW_PROCESS_GROUP)
+	pid, err := startWithFlags(self, base|windows.CREATE_BREAKAWAY_FROM_JOB)
+	if err == nil {
+		return pid, nil
+	}
+	return startWithFlags(self, base)
+}
+
+func startWithFlags(self string, flags uint32) (int, error) {
+	cmd := exec.Command(self, "--watch")
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: flags, HideWindow: true}
+	if err := cmd.Start(); err != nil {
+		return 0, err
+	}
+	pid := cmd.Process.Pid
+	_ = cmd.Process.Release()
+	return pid, nil
+}
 
 func setDetachedProcAttr(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		CreationFlags: 0x00000008 | 0x00000200, // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+		CreationFlags: windows.DETACHED_PROCESS | windows.CREATE_NEW_PROCESS_GROUP,
 	}
 }
 

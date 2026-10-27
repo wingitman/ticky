@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"crypto/rand"
 	"fmt"
 	"os"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/wingitman/ticky/internal/config"
+	"github.com/wingitman/ticky/internal/fsutil"
 )
 
 // Interrupt records a single pause reason and its timestamp.
@@ -82,29 +84,11 @@ func Save(s *Store) error {
 		return err
 	}
 
-	// Ensure the directory exists.
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	var buf bytes.Buffer
+	if err := toml.NewEncoder(&buf).Encode(s); err != nil {
 		return err
 	}
-
-	// Write to a temp file in the same directory so rename is same-drive (safe on Windows).
-	tmp := path + ".tmp"
-	f, err := os.Create(tmp)
-	if err != nil {
-		return err
-	}
-
-	if err := toml.NewEncoder(f).Encode(s); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-
-	return os.Rename(tmp, path)
+	return fsutil.WriteFileAtomic(path, buf.Bytes(), 0o644)
 }
 
 // newTOMLEncoder returns a TOML encoder writing to w. Exposed for tests.

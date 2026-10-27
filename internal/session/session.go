@@ -5,12 +5,14 @@
 package session
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/BurntSushi/toml"
 	"github.com/wingitman/ticky/internal/config"
+	"github.com/wingitman/ticky/internal/fsutil"
 )
 
 // Phase mirrors timer.Phase but is kept as a plain string for TOML clarity.
@@ -78,25 +80,11 @@ func Save(s *Session) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	var buf bytes.Buffer
+	if err := toml.NewEncoder(&buf).Encode(s); err != nil {
 		return err
 	}
-
-	tmp := path + ".tmp"
-	f, err := os.Create(tmp)
-	if err != nil {
-		return err
-	}
-	if err := toml.NewEncoder(f).Encode(s); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	return os.Rename(tmp, path)
+	return fsutil.WriteFileAtomic(path, buf.Bytes(), 0o644)
 }
 
 // Delete removes the session file. Safe to call when no session exists.

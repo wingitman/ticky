@@ -1,12 +1,15 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/wingitman/ticky/internal/fsutil"
 )
 
 // keybindEntries is the single authoritative list of every keybind TOML key
@@ -55,6 +58,7 @@ var updateEntries = []string{
 	"current_commit",
 	"repo_path",
 	"terminal",
+	"windows_shell",
 }
 
 var themeEntries = []string{"theme_name", "theme_file"}
@@ -88,6 +92,9 @@ type Updates struct {
 	CurrentCommit string `toml:"current_commit"`
 	RepoPath      string `toml:"repo_path"`
 	Terminal      string `toml:"terminal"`
+	// WindowsShell selects the shell for detached updates on Windows:
+	// auto (PowerShell when usable, else Command Prompt) | powershell | cmd.
+	WindowsShell string `toml:"windows_shell"`
 }
 
 // Display holds display preferences.
@@ -178,6 +185,7 @@ func Default() *Config {
 			CurrentCommit: "",
 			RepoPath:      "",
 			Terminal:      "",
+			WindowsShell:  "auto",
 		},
 		Themes: Themes{
 			ThemeName: "terminal",
@@ -237,7 +245,16 @@ func Load() (*Config, error) {
 
 	// File exists — decode into cfg (unknown fields are silently ignored).
 	if _, err := toml.DecodeFile(path, cfg); err != nil {
-		return cfg, err
+		// Older builds wrote Windows paths without escaping backslashes,
+		// producing invalid TOML. Repair those lines once, keeping a backup.
+		repaired, ok := repairConfigFile(path)
+		if !ok {
+			return cfg, err
+		}
+		cfg = Default()
+		if _, err := toml.Decode(repaired, cfg); err != nil {
+			return cfg, err
+		}
 	}
 
 	// Fill any keybind fields that were absent in the file with their defaults.
@@ -260,6 +277,7 @@ func Load() (*Config, error) {
 	if cfg.Themes.ThemeFile == "" {
 		cfg.Themes.ThemeFile = defaultThemeFile()
 	}
+	cfg.Updates.WindowsShell = NormalizeWindowsShell(cfg.Updates.WindowsShell)
 
 	// Migration: if the file is missing any known key, rewrite it in full so
 	// the user can see and edit the new entries. User values are preserved
@@ -270,6 +288,19 @@ func Load() (*Config, error) {
 	_ = EnsureThemesFile(cfg)
 
 	return cfg, nil
+}
+
+// NormalizeWindowsShell returns a valid windows_shell value, defaulting
+// unknown or empty values to "auto".
+func NormalizeWindowsShell(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "powershell", "pwsh":
+		return "powershell"
+	case "cmd", "command prompt", "cmd.exe":
+		return "cmd"
+	default:
+		return "auto"
+	}
 }
 
 // applyKeybindDefaults fills every empty keybind field with its default value.
@@ -406,13 +437,79 @@ func fileContainsKeyInSection(content, section, key string) bool {
 // writeMigrated rewrites the config file with all current keys and comments,
 // preserving the user's existing values by encoding the already-loaded cfg.
 func writeMigrated(path string, cfg *Config) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
+	return fsutil.WriteFileAtomic(path, []byte(migratedTOML(cfg)), 0o644)
+}
+
+// pathValueKeys are config keys whose values are filesystem paths or commands
+// that older builds wrote without escaping backslashes.
+var pathValueKeys = []string{"theme_file", "repo_path", "terminal", "current_commit"}
+
+// repairBackslashes rewrites `key = "C:\path"` lines, written unescaped by
+// older builds, into valid TOML. Only lines that fail to parse on their own
+// are touched. It reports whether anything changed.
+func repairBackslashes(content string) (string, bool) {
+	lines := strings.Split(content, "\n")
+	changed := false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") || !strings.Contains(trimmed, `\`) {
+			continue
+		}
+		eq := strings.Index(line, "=")
+		if eq < 0 {
+			continue
+		}
+		key := strings.TrimSpace(line[:eq])
+		if !containsString(pathValueKeys, key) {
+			continue
+		}
+		rest := line[eq+1:]
+		var probe map[string]any
+		if _, err := toml.Decode("x ="+rest, &probe); err == nil {
+			continue
+		}
+		fixed := strings.ReplaceAll(rest, `\`, `\\`)
+		if _, err := toml.Decode("x ="+fixed, &probe); err != nil {
+			continue
+		}
+		lines[i] = line[:eq+1] + fixed
+		changed = true
 	}
-	defer f.Close()
-	_, err = f.WriteString(migratedTOML(cfg))
-	return err
+	return strings.Join(lines, "\n"), changed
+}
+
+// repairConfigFile applies repairBackslashes to the config at path. When the
+// repaired content parses, the original is copied to path+".bak" and the file
+// is replaced. It returns the repaired content and whether it was applied.
+func repairConfigFile(path string) (string, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	repaired, changed := repairBackslashes(string(data))
+	if !changed {
+		return "", false
+	}
+	var probe map[string]any
+	if _, err := toml.Decode(repaired, &probe); err != nil {
+		return "", false
+	}
+	if err := fsutil.WriteFileAtomic(path+".bak", data, 0o644); err != nil {
+		return "", false
+	}
+	if err := fsutil.WriteFileAtomic(path, []byte(repaired), 0o644); err != nil {
+		return "", false
+	}
+	return repaired, true
+}
+
+func containsString(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 // migratedTOML produces a fully-commented TOML string with the user's values
@@ -455,7 +552,8 @@ func migratedTOML(cfg *Config) string {
 		"disable_checks = " + boolStr(u.DisableChecks) + "   # true disables startup update checks\n" +
 		"current_commit = " + quote(u.CurrentCommit) + "   # installed app commit, maintained by ticky\n" +
 		"repo_path = " + quote(u.RepoPath) + "   # source checkout used for updates\n" +
-		"terminal = " + quote(u.Terminal) + "   # optional terminal command for detached updates\n\n" +
+		"terminal = " + quote(u.Terminal) + "   # optional terminal command for detached updates\n" +
+		"windows_shell = " + quote(u.WindowsShell) + "   # Windows updater shell: auto | powershell | cmd\n\n" +
 		"[themes]\n" +
 		"theme_name = " + quote(cfg.Themes.ThemeName) + "   # terminal, or a named theme from theme_file\n" +
 		"theme_file = " + quote(cfg.Themes.ThemeFile) + "   # shared Delbysoft theme file\n" +
@@ -473,6 +571,23 @@ func migratedTOML(cfg *Config) string {
 		"# brand_primary = \"#FFFFFF\"\n" +
 		"# brand_secondary = \"#5865F2\"\n" +
 		"# selector = \"#FFFFFF\"\n"
+	out += themeOverridesTOML(cfg.Themes)
+	return out
+}
+
+// themeOverridesTOML writes the user's active colour overrides so that
+// migrations and metadata updates do not discard them.
+func themeOverridesTOML(t Themes) string {
+	colors := themeColors(t)
+	keys := make([]string, 0, len(colors))
+	for k := range colors {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var out string
+	for _, k := range keys {
+		out += k + " = " + quote(colors[k]) + "\n"
+	}
 	return out
 }
 
@@ -548,7 +663,39 @@ func RecordUpdateMetadata(commit, repoPath string) error {
 	return writeMigrated(path, cfg)
 }
 
-func quote(s string) string { return `"` + s + `"` }
+// quote renders s as a TOML basic string, escaping backslashes, quotes and
+// control characters so Windows paths such as C:\Users round-trip safely.
+func quote(s string) string {
+	var b strings.Builder
+	b.Grow(len(s) + 2)
+	b.WriteByte('"')
+	for _, r := range s {
+		switch r {
+		case '\\':
+			b.WriteString(`\\`)
+		case '"':
+			b.WriteString(`\"`)
+		case '\b':
+			b.WriteString(`\b`)
+		case '\t':
+			b.WriteString(`\t`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\f':
+			b.WriteString(`\f`)
+		case '\r':
+			b.WriteString(`\r`)
+		default:
+			if r < 0x20 || r == 0x7f {
+				fmt.Fprintf(&b, `\u%04X`, r)
+			} else {
+				b.WriteRune(r)
+			}
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
+}
 func boolStr(b bool) string {
 	if b {
 		return "true"
@@ -578,14 +725,7 @@ func itoa(n int) string {
 
 // WriteDefault writes a fully-commented default config to path.
 func WriteDefault(path string) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	_, err = f.WriteString(defaultTOML())
-	return err
+	return fsutil.WriteFileAtomic(path, []byte(defaultTOML()), 0o644)
 }
 
 // ResolveEditor returns the best editor for the current environment.

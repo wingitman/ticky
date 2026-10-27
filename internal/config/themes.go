@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/wingitman/ticky/internal/fsutil"
 )
 
 // Themes selects a shared Delbysoft theme and contains optional per-app
@@ -89,11 +90,11 @@ func EnsureThemesFile(cfg *Config) error {
 		if updated == string(data) {
 			return nil
 		}
-		return os.WriteFile(path, []byte(updated), 0644)
+		return fsutil.WriteFileAtomic(path, []byte(updated), 0o644)
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	return os.WriteFile(path, []byte(defaultThemesTOML), 0644)
+	return fsutil.WriteFileAtomic(path, []byte(defaultThemesTOML), 0o644)
 }
 
 // ThemeNames returns terminal plus every named theme in the shared file.
@@ -129,7 +130,7 @@ func SetThemeName(name string) error {
 		return err
 	}
 	content := setSectionKey(string(data), "themes", "theme_name", quote(name))
-	return os.WriteFile(path, []byte(content), 0644)
+	return fsutil.WriteFileAtomic(path, []byte(content), 0o644)
 }
 
 // ResolveTheme loads the selected shared theme and applies local overrides.

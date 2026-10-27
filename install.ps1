@@ -4,9 +4,12 @@
     Installs ticky on Windows.
 
 .DESCRIPTION
-    Builds the ticky binary with 'go build', installs it to
-    $env:LOCALAPPDATA\Programs\ticky, and adds that directory to your
-    user PATH (persisted via the registry) without requiring admin rights.
+    Builds the ticky binary with 'go build' (or uses releases\windows), then
+    runs `ticky --install`, which copies it to $env:LOCALAPPDATA\Programs\ticky,
+    adds that directory to your user PATH without requiring admin rights, and
+    adds the prompt integration to your PowerShell profile.
+
+    install.cmd does the same from Command Prompt when PowerShell is blocked.
 
 .EXAMPLE
     .\install.ps1
@@ -23,13 +26,10 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $BinaryName  = 'ticky.exe'
-$InstallDir  = Join-Path $env:LOCALAPPDATA 'Programs\ticky'
 $BuildDir    = if ($BuildDirOverride) { $BuildDirOverride } else { Join-Path $PSScriptRoot 'bin' }
 $BinaryBuild = Join-Path $BuildDir $BinaryName
 $DesktopBinaryName = 'ticky-desktop.exe'
 $DesktopBuild = Join-Path $BuildDir $DesktopBinaryName
-$DesktopDest = Join-Path $InstallDir $DesktopBinaryName
-$BinaryDest  = Join-Path $InstallDir $BinaryName
 $ReleaseBin  = Join-Path $PSScriptRoot 'releases\windows\ticky.exe'
 $ReleaseDesktop = Join-Path $PSScriptRoot 'releases\windows\ticky-desktop.exe'
 
@@ -86,7 +86,7 @@ if ($BuildAll) {
 
 # Detached update scripts call this installer after checking out the target
 # commit. Do not modify shell profiles or print first-install instructions.
-$SkipShellIntegration = $Update
+$DesktopSource = $null
 
 if (Get-Command go -ErrorAction SilentlyContinue) {
     Write-Step 'Go found - building ticky from source...'
@@ -98,7 +98,11 @@ if (Get-Command go -ErrorAction SilentlyContinue) {
     if ($LASTEXITCODE -ne 0) { Write-Host 'ERROR: go build failed.' -ForegroundColor Red; exit 1 }
     Write-Ok "Built: $BinaryBuild"
     & go build -tags desktop -ldflags="-s -w -X github.com/wingitman/ticky/internal/version.Commit=$Commit" -o $DesktopBuild ./cmd/ticky-desktop
-    if ($LASTEXITCODE -ne 0) { Write-Host 'ERROR: desktop build failed.' -ForegroundColor Red; exit 1 }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Note 'WARNING: desktop build failed; installing the terminal app only.'
+    } else {
+        $DesktopSource = $DesktopBuild
+    }
     $SourceBin = $BinaryBuild
 } else {
     Write-Step 'Go not found - using pre-built binary from releases\windows\...'
@@ -109,148 +113,26 @@ if (Get-Command go -ErrorAction SilentlyContinue) {
     }
     Write-Ok "Using: $ReleaseBin"
     $SourceBin = $ReleaseBin
+    if (Test-Path $ReleaseDesktop) { $DesktopSource = $ReleaseDesktop }
 }
 
 # ---------------------------------------------------------------------------
-# 3. Install binary
+# 2. Install. The copy, PATH update, and prompt integration are implemented in
+#    `ticky --install` so install.cmd (Command Prompt) behaves identically.
 # ---------------------------------------------------------------------------
-Write-Step 'Installing binary...'
-if (-not (Test-Path $InstallDir)) {
-    New-Item -ItemType Directory -Path $InstallDir | Out-Null
-}
-Copy-Item -Path $SourceBin -Destination $BinaryDest -Force
-if (Test-Path $DesktopBuild) {
-    Copy-Item -Path $DesktopBuild -Destination $DesktopDest -Force
-} elseif (Test-Path $ReleaseDesktop) {
-    Copy-Item -Path $ReleaseDesktop -Destination $DesktopDest -Force
-}
-Write-Ok "Installed: $BinaryDest"
-
-# ---------------------------------------------------------------------------
-# 4. Add install dir to user PATH (persistent, no admin required)
-# ---------------------------------------------------------------------------
-Write-Step 'Updating user PATH...'
-$registryPath = 'HKCU:\Environment'
-$currentPath  = (Get-ItemProperty -Path $registryPath -Name Path -ErrorAction SilentlyContinue).Path
-
-if ($currentPath -and ($currentPath -split ';') -contains $InstallDir) {
-    Write-Note "$InstallDir is already in your PATH."
-} else {
-    $newPath = if ($currentPath) { "$currentPath;$InstallDir" } else { $InstallDir }
-    Set-ItemProperty -Path $registryPath -Name Path -Value $newPath
-    Write-Ok "Added $InstallDir to user PATH."
-
-    # Broadcast WM_SETTINGCHANGE so Explorer and new terminals pick up the
-    # change without requiring a logoff.
-    $signature = @'
-[DllImport("user32.dll", SetLastError=true, CharSet=CharSet.Auto)]
-public static extern IntPtr SendMessageTimeout(
-    IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam,
-    uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
-'@
-    $type   = Add-Type -MemberDefinition $signature -Name WinEnv -Namespace Win32 -PassThru
-    $result = [UIntPtr]::Zero
-    $type::SendMessageTimeout(
-        [IntPtr]0xffff, 0x001A, [UIntPtr]::Zero, 'Environment',
-        0x0002, 5000, [ref]$result
-    ) | Out-Null
-}
-
-# Also update the current session so the user can run ticky right away.
-if (($env:PATH -split ';') -notcontains $InstallDir) {
-    $env:PATH = "$env:PATH;$InstallDir"
-}
-
-# ---------------------------------------------------------------------------
-# 5. Shell prompt integration
-# ---------------------------------------------------------------------------
-if (-not $SkipShellIntegration) {
-Write-Step 'Setting up shell prompt integration...'
-
-# ── tmux (live updates, additive — runs alongside shell prompt method) ──────
-$TmuxCfgXdg    = Join-Path $env:USERPROFILE '.config\tmux\tmux.conf'
-$TmuxCfgLegacy = Join-Path $env:USERPROFILE '.tmux.conf'
-$TmuxCfgPath   = if (Test-Path $TmuxCfgXdg) { $TmuxCfgXdg } elseif (Test-Path $TmuxCfgLegacy) { $TmuxCfgLegacy } else { $null }
-
-if ($TmuxCfgPath) {
-    $tmuxContent = Get-Content $TmuxCfgPath -Raw -ErrorAction SilentlyContinue
-    if ($tmuxContent -match 'ticky shell integration') {
-        Write-Note 'tmux: ticky already integrated — skipping.'
-    } else {
-        $tmuxBlock = "`n# ticky shell integration`nset -g status-interval 1`nset -g status-right-length 120`nset -g status-right `"#(ticky --status 2>`$null)  #[fg=blue]#{?client_prefix,PREFIX ,}#[fg=brightblack]#h `"`n"
-        Add-Content -Path $TmuxCfgPath -Value $tmuxBlock
-        Write-Ok "tmux: added live status bar to $TmuxCfgPath"
-        Write-Note "tmux: run 'tmux source-file $TmuxCfgPath' to apply without restarting tmux"
-    }
-}
-
-# ── Shell prompt ($PROFILE) — only when no tmux config was found ─────────────
-if ($TmuxCfgPath) {
-    Write-Note 'tmux detected — skipping PowerShell prompt integration (tmux provides live updates).'
-}
-
-if (-not $TmuxCfgPath) {
-
-$ProfilePath = $PROFILE
-if (-not $ProfilePath) {
-    $ProfilePath = Join-Path $env:USERPROFILE 'Documents\PowerShell\Microsoft.PowerShell_profile.ps1'
-}
-
-$IntegrationBlock = @"
-
-# ticky shell integration
-function prompt {
-    `$s = ticky --status 2>`$null
-    if (`$s) { Write-Host "`$s " -NoNewline -ForegroundColor Blue }
-    "PS `$(Get-Location)> "
-}
-"@
-
-if (Test-Path $ProfilePath) {
-    $existing = Get-Content $ProfilePath -Raw -ErrorAction SilentlyContinue
-    if ($existing -match 'ticky shell integration') {
-        Write-Note 'PowerShell profile: ticky already integrated — skipping.'
-    } else {
-        Add-Content -Path $ProfilePath -Value $IntegrationBlock
-        Write-Ok "PowerShell: added ticky prompt to $ProfilePath"
-    }
-} else {
-    $dir = Split-Path $ProfilePath
-    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-    Set-Content -Path $ProfilePath -Value $IntegrationBlock.TrimStart()
-    Write-Ok "PowerShell: created $ProfilePath with ticky prompt"
-}
-
-} # end if (-not $TmuxCfgPath)
-} # end if (-not $SkipShellIntegration)
-
-# ---------------------------------------------------------------------------
-# 6. Done
-# ---------------------------------------------------------------------------
-$ConfigFile = Join-Path $env:APPDATA 'delbysoft\ticky.toml'
-$DataFile   = Join-Path $env:APPDATA 'delbysoft\tasks.toml'
-
-Write-Host ''
+$installArgs = @('--install', '--from', $SourceBin)
+if ($DesktopSource) { $installArgs += @('--desktop-from', $DesktopSource) }
 if ($Update) {
-    Write-Host '  ticky updated successfully!' -ForegroundColor Green
-} else {
-    Write-Host '  ticky installed successfully!' -ForegroundColor Green
+    $installArgs += '--update'
+} elseif ($PROFILE) {
+    $installArgs += @('--powershell-profile', $PROFILE)
 }
-Write-Host ''
-Write-Host '  To show the active task in your prompt, open ticky and press o,' -ForegroundColor White
-Write-Host '  then enable these options in ticky.toml:' -ForegroundColor White
-Write-Host '    show_task_name = true' -ForegroundColor Cyan
-Write-Host '    show_time_left = true' -ForegroundColor Cyan
-Write-Host ''
-Write-Host '  Open a new terminal and run:' -ForegroundColor White
-Write-Host '    ticky' -ForegroundColor Cyan
-Write-Host ''
-Write-Host '  Config file (created on first launch):' -ForegroundColor White
-Write-Host "    $ConfigFile" -ForegroundColor Cyan
-Write-Host ''
-Write-Host '  Task data file (created on first task):' -ForegroundColor White
-Write-Host "    $DataFile" -ForegroundColor Cyan
-Write-Host ''
-Write-Note "  Tip: if you get an 'execution policy' error, run once as your user:"
-Write-Note '    Set-ExecutionPolicy -Scope CurrentUser RemoteSigned'
-Write-Host ''
+& $SourceBin @installArgs
+if ($LASTEXITCODE -ne 0) { Write-Host 'ERROR: ticky --install failed.' -ForegroundColor Red; exit $LASTEXITCODE }
+
+if (-not $Update) {
+    Write-Host ''
+    Write-Note "Tip: if you get an 'execution policy' error, run once as your user:"
+    Write-Note '  Set-ExecutionPolicy -Scope CurrentUser RemoteSigned'
+    Write-Note 'If PowerShell is blocked on this machine, use install.cmd instead.'
+}

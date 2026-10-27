@@ -45,6 +45,8 @@ type InstallRequest struct {
 	Latest         bool
 	Terminal       string
 	RecorderBinary string
+	// WindowsShell is the windows_shell preference: auto | powershell | cmd.
+	WindowsShell string
 }
 
 // Check ensures a source checkout exists, fetches its origin, and returns the
@@ -230,8 +232,8 @@ func launchUnix(req InstallRequest) error {
 }
 
 func writeUnixScript(req InstallRequest) (string, error) {
-	dir := filepath.Join(os.TempDir(), "ticky-updates")
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	dir, err := updatesDir()
+	if err != nil {
 		return "", err
 	}
 	path := filepath.Join(dir, fmt.Sprintf("update-%d.sh", time.Now().UnixNano()))
@@ -272,23 +274,49 @@ func writeUnixScript(req InstallRequest) (string, error) {
 	return path, nil
 }
 
-func launchWindows(req InstallRequest) error {
-	script, err := writeWindowsScript(req)
-	if err != nil {
-		return err
+// Windows update shells.
+const (
+	shellPowerShell = "powershell"
+	shellCmd        = "cmd"
+)
+
+// chooseWindowsShell resolves the windows_shell preference. "auto" uses
+// PowerShell only when the probe confirms it can run an unsigned script in
+// FullLanguage mode; machines where a domain policy blocks or constrains
+// PowerShell fall back to Command Prompt.
+func chooseWindowsShell(pref string, powerShellUsable func() bool) string {
+	switch config.NormalizeWindowsShell(pref) {
+	case shellPowerShell:
+		return shellPowerShell
+	case shellCmd:
+		return shellCmd
 	}
-	if req.Terminal != "" {
-		return exec.Command(req.Terminal, script).Start()
+	if powerShellUsable != nil && powerShellUsable() {
+		return shellPowerShell
 	}
-	if _, err := exec.LookPath("wt.exe"); err == nil {
-		return exec.Command("wt.exe", "powershell.exe", "-NoExit", "-ExecutionPolicy", "Bypass", "-File", script).Start()
-	}
-	return exec.Command("powershell.exe", "-NoExit", "-ExecutionPolicy", "Bypass", "-File", script).Start()
+	return shellCmd
 }
 
-func writeWindowsScript(req InstallRequest) (string, error) {
+// powerShellProbeScript prints the language mode. Constrained Language Mode
+// (AppLocker/WDAC) breaks the updater's .NET calls, so only FullLanguage
+// counts as usable.
+const powerShellProbeScript = "$ExecutionContext.SessionState.LanguageMode\r\n"
+
+func updatesDir() (string, error) {
 	dir := filepath.Join(os.TempDir(), "ticky-updates")
 	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+// writeWindowsScript writes the PowerShell updater. It builds the target
+// commit in a temporary worktree and installs it with the currently running
+// ticky's `--install`, so rolling back to commits that predate --install
+// still works.
+func writeWindowsScript(req InstallRequest) (string, error) {
+	dir, err := updatesDir()
+	if err != nil {
 		return "", err
 	}
 	path := filepath.Join(dir, fmt.Sprintf("update-%d.ps1", time.Now().UnixNano()))
@@ -304,43 +332,182 @@ $latest = %s
 $status = 0
 $log = Join-Path ([System.IO.Path]::GetTempPath()) ('ticky-update-' + [guid]::NewGuid().ToString() + '.log')
 $work = $null
-$prevRef = (git -C $repo rev-parse --abbrev-ref HEAD 2>$null).Trim()
-if (-not $prevRef) { $prevRef = 'HEAD' }
+$commit = 'unknown'
+$prevRef = (git -C $repo rev-parse --abbrev-ref HEAD 2>$null)
+if ($prevRef) { $prevRef = $prevRef.Trim() } else { $prevRef = 'HEAD' }
 "ticky update started" | Tee-Object -FilePath $log
 git -C $repo fetch --prune --all *>> $log
 if ($LASTEXITCODE -ne 0) { $status = $LASTEXITCODE }
 if ($status -eq 0) {
     if ($latest -and $prevRef -ne 'HEAD') {
-        $upstream = (git -C $repo rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>$null).Trim()
-        if (-not $upstream) { $upstream = "origin/$prevRef" }
-        $target = (git -C $repo rev-parse $upstream 2>> $log).Trim()
+        $upstream = (git -C $repo rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>$null)
+        if ($upstream) { $upstream = $upstream.Trim() } else { $upstream = "origin/$prevRef" }
+        $target = (git -C $repo rev-parse $upstream 2>> $log)
+        if ($target) { $target = $target.Trim() }
     }
     if (-not $target) { $status = 1; 'Could not resolve the update target.' | Add-Content $log }
 }
 if ($status -eq 0) {
     $work = Join-Path ([System.IO.Path]::GetTempPath()) ('ticky-update-' + [guid]::NewGuid().ToString())
     git -C $repo worktree add --detach $work $target *>> $log
-    if ($LASTEXITCODE -ne 0) { $status = $LASTEXITCODE }
+    if ($LASTEXITCODE -ne 0) { $status = $LASTEXITCODE; $work = $null }
 }
+$built = $null
+$desktop = $null
 if ($status -eq 0) {
+    $commit = (git -C $work rev-parse HEAD).Trim()
+    $built = Join-Path $work 'build\ticky.exe'
+    $desktop = Join-Path $work 'build\ticky-desktop.exe'
     Push-Location $work
-    & .\install.ps1 -Update -BuildDirOverride (Join-Path $work 'build') *>> $log
+    go build -ldflags="-s -w -X github.com/wingitman/ticky/internal/version.Commit=$commit" -o $built . *>> $log
     if ($LASTEXITCODE -ne 0) { $status = $LASTEXITCODE }
+    if ($status -eq 0) {
+        go build -tags desktop -ldflags="-s -w -X github.com/wingitman/ticky/internal/version.Commit=$commit" -o $desktop ./cmd/ticky-desktop *>> $log
+        if ($LASTEXITCODE -ne 0) { $desktop = $null; 'Desktop build failed; continuing without it.' | Add-Content $log }
+    }
     Pop-Location
 }
-$installed = if ($work) { (git -C $work rev-parse HEAD).Trim() } else { 'unknown' }
-if ($status -eq 0 -and $recorder -and (Test-Path $recorder)) { & $recorder --record-update --update-commit $installed --update-repo $repo *>> $log; if ($LASTEXITCODE -ne 0) { $status = $LASTEXITCODE } }
+if ($status -eq 0) {
+    $installer = if ($recorder -and (Test-Path $recorder)) { $recorder } else { $built }
+    $installArgs = @('--install', '--update', '--from', $built)
+    if ($desktop) { $installArgs += @('--desktop-from', $desktop) }
+    & $installer @installArgs *>> $log
+    if ($LASTEXITCODE -ne 0) { $status = $LASTEXITCODE }
+    if ($status -eq 0) {
+        & $installer --record-update --update-commit $commit --update-repo $repo *>> $log
+        if ($LASTEXITCODE -ne 0) { $status = $LASTEXITCODE }
+    }
+}
 if ($work) { git -C $repo worktree remove --force $work *>> $log; if ($LASTEXITCODE -ne 0) { $status = 1 } }
 Write-Host ""
 Write-Host "--- updater output ---"
 Get-Content $log
-if ($status -eq 0) { Write-Host "ticky update complete: $installed" -ForegroundColor Green } else { Write-Host "ticky update failed (exit $status). Log: $log" -ForegroundColor Red }
+if ($status -eq 0) { Write-Host "ticky update complete: $commit" -ForegroundColor Green } else { Write-Host "ticky update failed (exit $status). Log: $log" -ForegroundColor Red }
 Read-Host 'Press Enter to close'
+exit $status
 `, psQuote(req.RepoPath), psQuote(req.TargetCommit), psQuote(req.RecorderBinary), latest)
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		return "", err
 	}
 	return path, nil
+}
+
+// writeCmdScript writes the Command Prompt updater, used when PowerShell is
+// blocked. It mirrors writeWindowsScript. Control flow uses goto rather than
+// parenthesised blocks so %%VAR%% values are expanded after they are set,
+// and delayed expansion stays off so "!" in paths is literal.
+func writeCmdScript(req InstallRequest) (string, error) {
+	dir, err := updatesDir()
+	if err != nil {
+		return "", err
+	}
+	stamp := time.Now().UnixNano()
+	path := filepath.Join(dir, fmt.Sprintf("update-%d.cmd", stamp))
+	logPath := filepath.Join(dir, fmt.Sprintf("update-%d.log", stamp))
+	work := filepath.Join(os.TempDir(), fmt.Sprintf("ticky-update-%d", stamp))
+	latest := "0"
+	if req.Latest {
+		latest = "1"
+	}
+	const ldflags = `-ldflags="-s -w -X github.com/wingitman/ticky/internal/version.Commit=%COMMIT%"`
+	lines := []string{
+		"@echo off",
+		"setlocal EnableExtensions DisableDelayedExpansion",
+		"title ticky update",
+		cmdSet("REPO", req.RepoPath),
+		cmdSet("TARGET", req.TargetCommit),
+		cmdSet("RECORDER", req.RecorderBinary),
+		cmdSet("LATEST", latest),
+		cmdSet("LOG", logPath),
+		cmdSet("WORK", work),
+		`set "STATUS=0"`,
+		`set "WORKTREE="`,
+		`set "COMMIT=unknown"`,
+		`type nul > "%LOG%"`,
+		"echo ticky update started",
+		`echo ticky update started>>"%LOG%"`,
+		`set "PREV_REF=HEAD"`,
+		cmdCapture("r", "git -C \"%REPO%\" rev-parse --abbrev-ref HEAD 2^>nul", "PREV_REF"),
+		`git -C "%REPO%" fetch --prune --all >>"%LOG%" 2>&1`,
+		`if errorlevel 1 set "STATUS=%ERRORLEVEL%"`,
+		`if not "%STATUS%"=="0" goto finish`,
+		`if "%LATEST%"=="1" if not "%PREV_REF%"=="HEAD" call :resolve_latest`,
+		`if not defined TARGET echo Could not resolve the update target.>>"%LOG%"`,
+		`if not defined TARGET set "STATUS=1"`,
+		`if not "%STATUS%"=="0" goto finish`,
+		`git -C "%REPO%" worktree add --detach "%WORK%" "%TARGET%" >>"%LOG%" 2>&1`,
+		`if errorlevel 1 set "STATUS=%ERRORLEVEL%"`,
+		`if not "%STATUS%"=="0" goto finish`,
+		`set "WORKTREE=1"`,
+		cmdCapture("c", "git -C \"%WORK%\" rev-parse HEAD 2^>nul", "COMMIT"),
+		`set "BUILT=%WORK%\build\ticky.exe"`,
+		`set "DESKTOP=%WORK%\build\ticky-desktop.exe"`,
+		`pushd "%WORK%"`,
+		`go build ` + ldflags + ` -o "%BUILT%" . >>"%LOG%" 2>&1`,
+		`if errorlevel 1 set "STATUS=%ERRORLEVEL%"`,
+		`if not "%STATUS%"=="0" popd`,
+		`if not "%STATUS%"=="0" goto finish`,
+		`go build -tags desktop ` + ldflags + ` -o "%DESKTOP%" .\cmd\ticky-desktop >>"%LOG%" 2>&1`,
+		`if errorlevel 1 set "DESKTOP="`,
+		`popd`,
+		`if not defined DESKTOP echo Desktop build failed; continuing without it.>>"%LOG%"`,
+		`set "INSTALLER=%BUILT%"`,
+		`if defined RECORDER if exist "%RECORDER%" set "INSTALLER=%RECORDER%"`,
+		`if defined DESKTOP goto install_with_desktop`,
+		`"%INSTALLER%" --install --update --from "%BUILT%" >>"%LOG%" 2>&1`,
+		`goto installed`,
+		`:install_with_desktop`,
+		`"%INSTALLER%" --install --update --from "%BUILT%" --desktop-from "%DESKTOP%" >>"%LOG%" 2>&1`,
+		`:installed`,
+		`if errorlevel 1 set "STATUS=%ERRORLEVEL%"`,
+		`if not "%STATUS%"=="0" goto finish`,
+		`"%INSTALLER%" --record-update --update-commit "%COMMIT%" --update-repo "%REPO%" >>"%LOG%" 2>&1`,
+		`if errorlevel 1 set "STATUS=%ERRORLEVEL%"`,
+		`:finish`,
+		`if defined WORKTREE git -C "%REPO%" worktree remove --force "%WORK%" >>"%LOG%" 2>&1`,
+		`if defined WORKTREE if errorlevel 1 set "STATUS=1"`,
+		"echo.",
+		"echo --- updater output ---",
+		`type "%LOG%"`,
+		"echo.",
+		`if not "%STATUS%"=="0" goto failed`,
+		"echo ticky update complete: %COMMIT%",
+		"goto done",
+		":failed",
+		`echo ticky update failed (exit %STATUS%). Log: "%LOG%"`,
+		":done",
+		"echo Press any key to close...",
+		"pause >nul",
+		`exit /b %STATUS%`,
+		"",
+		":resolve_latest",
+		`set "UPSTREAM=origin/%PREV_REF%"`,
+		cmdCapture("u", "git -C \"%REPO%\" rev-parse --abbrev-ref --symbolic-full-name @{u} 2^>nul", "UPSTREAM"),
+		`set "TARGET="`,
+		cmdCapture("t", "git -C \"%REPO%\" rev-parse \"%UPSTREAM%\" 2^>nul", "TARGET"),
+		"exit /b 0",
+		"",
+	}
+	content := strings.Join(lines, "\r\n")
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+// cmdCapture renders a batch line that stores the last output line of
+// command in variable name. Redirections inside command must be ^-escaped.
+func cmdCapture(letter, command, name string) string {
+	return `for /f "usebackq delims=" %%` + letter + " in (`" + command + "`) do set \"" + name + "=%%" + letter + `"`
+}
+
+// cmdSet renders `set "NAME=value"` for a batch file with delayed expansion
+// disabled. Inside the quoted form &, |, <, >, ^ and ! are literal; only %
+// needs doubling. Quotes and line breaks cannot occur in Windows paths or
+// commit hashes and would break the line, so they are dropped.
+func cmdSet(name, value string) string {
+	value = strings.NewReplacer(`"`, "", "\r", "", "\n", "", "%", "%%").Replace(value)
+	return `set "` + name + "=" + value + `"`
 }
 
 func terminalCommand(preferred string, script string) (string, []string, error) {
